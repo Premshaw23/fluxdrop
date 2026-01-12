@@ -39,9 +39,23 @@ export default function SendPage() {
   const dataChannelReadyRef = useRef(false);
   const filesRef = useRef<File[]>([]);
 
+  // Track when both data channel and shared secret are ready
+  const [readyToTransfer, setReadyToTransfer] = useState(false);
+
+  // Effect: when readyToTransfer is true, start transfer
+  useEffect(() => {
+    if (readyToTransfer && filesRef.current.length > 0) {
+      startTransfer(filesRef.current);
+      setReadyToTransfer(false); // reset after starting
+    }
+  }, [readyToTransfer]);
+
   useEffect(() => {
     return () => {
-      // Cleanup on unmount
+      // Inform peer of cancel on unmount if connected
+      if (signalingRef.current && signalingRef.current.isConnected()) {
+        signalingRef.current.send({ type: 'session-cancel' });
+      }
       transferRef.current?.cancel();
       rtcRef.current?.close();
       signalingRef.current?.disconnect();
@@ -152,11 +166,8 @@ export default function SendPage() {
           console.log('[SendPage][DEBUG] Data channel opened');
           dataChannelReadyRef.current = true;
           // Only start transfer if files are selected and handshake is complete
-          if (filesRef.current.length > 0) {
-            console.log('[SendPage][DEBUG] Data channel open, starting transfer with files:', filesRef.current);
-            startTransfer(filesRef.current);
-          } else {
-            console.log('[SendPage][DEBUG] Data channel open, but no files selected');
+          if (filesRef.current.length > 0 && sharedSecretRef.current) {
+            setReadyToTransfer(true);
           }
         },
         onError: (err) => {
@@ -197,6 +208,10 @@ export default function SendPage() {
         if (ecdhKeyPairRef.current) {
           sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
           console.log('[SendPage] Shared secret derived');
+          // Only start transfer if files are selected and data channel is ready
+          if (filesRef.current.length > 0 && dataChannelReadyRef.current) {
+            setReadyToTransfer(true);
+          }
         }
       });
 
@@ -214,8 +229,22 @@ export default function SendPage() {
       });
 
       signaling.on('peer-disconnected', () => {
-        // ...existing code...
         setError('Receiver disconnected. Please try again or resend files.');
+        setStep('select');
+        transferRef.current?.cancel();
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
+      });
+      // Listen for session-cancel and session-reset from peer
+      signaling.on('session-cancel', () => {
+        setError('Receiver cancelled the session. Please start a new transfer.');
+        setStep('select');
+        transferRef.current?.cancel();
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
+      });
+      signaling.on('session-reset', () => {
+        setError('Receiver reset the session. Please start a new transfer.');
         setStep('select');
         transferRef.current?.cancel();
         rtcRef.current?.close();
@@ -318,6 +347,10 @@ export default function SendPage() {
   };
 
   const reset = () => {
+    // Inform peer of reset if connected
+    if (signalingRef.current && signalingRef.current.isConnected()) {
+      signalingRef.current.send({ type: 'session-reset' });
+    }
     transferRef.current?.cancel();
     rtcRef.current?.close();
     signalingRef.current?.disconnect();
@@ -346,12 +379,10 @@ export default function SendPage() {
     setSpeedList(new Array(filesRef.current.length).fill(0));
     setTimeRemainingList(new Array(filesRef.current.length).fill(0));
     setErrorLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] Retrying transfer...`]);
+    dataChannelReadyRef.current = false;
+    setReadyToTransfer(false);
     initializeConnection();
-    setTimeout(() => {
-      if (dataChannelReadyRef.current && filesRef.current.length > 0) {
-        startTransfer(filesRef.current);
-      }
-    }, 0);
+    // No need for setTimeout/startTransfer here; transfer will start when both ready
   };
 
   return (

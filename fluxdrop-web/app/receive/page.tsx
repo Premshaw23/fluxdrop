@@ -18,6 +18,8 @@ export default function ReceivePage() {
   const peerPublicKeyRef = useRef<CryptoKey | null>(null);
   const sharedSecretRef = useRef<CryptoKey | null>(null);
   const [step, setStep] = useState<Step>('enter-code');
+  const stepRef = useRef<Step>('enter-code');
+  useEffect(() => { stepRef.current = step; }, [step]);
   const [code, setCode] = useState('');
   const [batchMetadata, setBatchMetadata] = useState<FileMetadata[]>([]);
   const [metadataList, setMetadataList] = useState<(FileMetadata | null)[]>([]);
@@ -36,6 +38,20 @@ export default function ReceivePage() {
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferReceiver | null>(null);
   const fileIndexRef = useRef(0);
+  // Track if transfer is complete, for robust error suppression
+  const transferCompleteRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      // Inform peer of cancel on unmount if connected
+      if (signalingRef.current && signalingRef.current.isConnected()) {
+        signalingRef.current.send({ type: 'session-cancel' });
+      }
+      rtcRef.current?.close();
+      signalingRef.current?.disconnect();
+    };
+  }, []);
+
 
   useEffect(() => {
     return () => {
@@ -77,7 +93,46 @@ export default function ReceivePage() {
           transferRef.current?.handleMessage(data);
         },
         onError: (err) => {
-          setError(err.message);
+          // Debug log for error and step
+          console.log('[ReceivePage][DEBUG] onError called:', err, 'step:', stepRef.current);
+          if (typeof err === 'object' && err !== null) {
+            if ('name' in err) console.log('[ReceivePage][DEBUG] err.name:', (err as any).name);
+            if ('message' in err) console.log('[ReceivePage][DEBUG] err.message:', (err as any).message);
+          }
+          // Suppress 'User-Initiated Abort' errors after transfer complete
+          const isOpError = (e: unknown): e is { name: string; message?: string } =>
+            typeof e === 'object' && e !== null && 'name' in e && typeof (e as any).name === 'string';
+          let opError: { name: string; message?: string } | undefined = undefined;
+          if (typeof err === 'object' && err !== null && 'name' in err && (err as any).name === 'OperationError') {
+            opError = err as any;
+          }
+          if (err.message === 'Data channel error' || opError) {
+            // Robust: suppress after transfer complete, even if step is not 'complete'
+            if (stepRef.current === 'complete' || transferCompleteRef.current) {
+              if (opError && (opError.message?.includes('User-Initiated Abort') || opError.message?.includes('Close called'))) {
+                // Suppress error
+                console.log('[ReceivePage][DEBUG] Suppressing User-Initiated Abort/Close error after complete (transferCompleteRef)');
+                return;
+              }
+              setError('Warning: Sender disconnected. You can still download your files.');
+            } else {
+              setError('Connection lost. The sender has reset or closed the session. Please enter a new code to receive files.');
+              setStep('enter-code');
+              rtcRef.current?.close();
+              signalingRef.current?.disconnect();
+              setBatchMetadata([]);
+              setMetadataList([]);
+              setProgressList([]);
+              setSpeedList([]);
+              setTimeRemainingList([]);
+              setReceivedFiles([]);
+              setHandshakeInProgress(false);
+              fileIndexRef.current = 0;
+              transferCompleteRef.current = false;
+            }
+          } else {
+            setError(err.message);
+          }
         }
       });
       rtcRef.current = rtc;
@@ -114,7 +169,7 @@ export default function ReceivePage() {
           setSpeedList(new Array(files.length).fill(0));
           setTimeRemainingList(new Array(files.length).fill(0));
           setReceivedFiles(new Array(files.length).fill(null));
-          fileIndexRef.current = 0; // Reset file index for new batch
+          fileIndexRef.current = 0 // Reset file index for new batch
         };
         transfer.onMetadata = (meta: FileMetadata) => {
           setMetadataList((prev) => {
@@ -183,6 +238,7 @@ export default function ReceivePage() {
             console.log(`[ReceivePage] ReceivedCount=${receivedCount}, totalFiles=${totalFiles}`);
             if (receivedCount >= totalFiles) {
               console.log('[ReceivePage] All files received, setting step to complete');
+              transferCompleteRef.current = true;
               setStep('complete');
               ecdhKeyPairRef.current = null;
               peerPublicKeyRef.current = null;
@@ -216,10 +272,59 @@ export default function ReceivePage() {
       signaling.on('session-joined', async () => {
         signaling.on('peer-disconnected', () => {
           console.warn('[ReceivePage] Peer disconnected');
-          setError('Sender disconnected. Please try again or receive more files.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
+          if (step === 'complete') {
+            setError('Warning: Sender disconnected. You can still download your files.');
+          } else {
+            setError('Sender disconnected. Please try again or receive more files.');
+            setStep('enter-code');
+            rtcRef.current?.close();
+            signalingRef.current?.disconnect();
+            setBatchMetadata([]);
+            setMetadataList([]);
+            setProgressList([]);
+            setSpeedList([]);
+            setTimeRemainingList([]);
+            setReceivedFiles([]);
+            setHandshakeInProgress(false);
+            fileIndexRef.current = 0;
+          }
+        });
+        // Listen for session-cancel and session-reset from peer
+        signaling.on('session-cancel', () => {
+          if (step === 'complete') {
+            setError('Warning: Sender cancelled the session. You can still download your files.');
+          } else {
+            setError('Sender cancelled the session. Please start a new transfer.');
+            setStep('enter-code');
+            rtcRef.current?.close();
+            signalingRef.current?.disconnect();
+            setBatchMetadata([]);
+            setMetadataList([]);
+            setProgressList([]);
+            setSpeedList([]);
+            setTimeRemainingList([]);
+            setReceivedFiles([]);
+            setHandshakeInProgress(false);
+            fileIndexRef.current = 0;
+          }
+        });
+        signaling.on('session-reset', () => {
+          if (step === 'complete') {
+            setError('Warning: Sender reset the session. You can still download your files.');
+          } else {
+            setError('Sender reset the session. Please start a new transfer.');
+            setStep('enter-code');
+            rtcRef.current?.close();
+            signalingRef.current?.disconnect();
+            setBatchMetadata([]);
+            setMetadataList([]);
+            setProgressList([]);
+            setSpeedList([]);
+            setTimeRemainingList([]);
+            setReceivedFiles([]);
+            setHandshakeInProgress(false);
+            fileIndexRef.current = 0;
+          }
         });
         // ECDH: generate key pair and send public key
         const keyPair = await generateECDHKeyPair();
@@ -254,8 +359,22 @@ export default function ReceivePage() {
       });
 
       signaling.on('error', (message) => {
-        setError(message.error || 'Session not found or expired. Please check the code and try again.');
-        setStep('enter-code');
+        if (step === 'complete') {
+          setError('Warning: Signaling error after transfer. You can still download your files.');
+        } else {
+          setError(message.error || 'Session not found or expired. Please check the code and try again.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+          setBatchMetadata([]);
+          setMetadataList([]);
+          setProgressList([]);
+          setSpeedList([]);
+          setTimeRemainingList([]);
+          setReceivedFiles([]);
+          setHandshakeInProgress(false);
+          fileIndexRef.current = 0;
+        }
       });
 
       // Handle ICE candidates
@@ -266,9 +385,22 @@ export default function ReceivePage() {
       // Join session
       signaling.joinSession(code);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to connect');
-      setStep('enter-code');
-      setHandshakeInProgress(false);
+      if (step === 'complete') {
+        setError('Warning: Connection error after transfer. You can still download your files.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to connect');
+        setStep('enter-code');
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
+        setBatchMetadata([]);
+        setMetadataList([]);
+        setProgressList([]);
+        setSpeedList([]);
+        setTimeRemainingList([]);
+        setReceivedFiles([]);
+        setHandshakeInProgress(false);
+        fileIndexRef.current = 0;
+      }
     }
   };
 
@@ -299,6 +431,10 @@ export default function ReceivePage() {
   };
 
   const reset = () => {
+    // Inform peer of reset if connected
+    if (signalingRef.current && signalingRef.current.isConnected()) {
+      signalingRef.current.send({ type: 'session-reset' });
+    }
     rtcRef.current?.close();
     signalingRef.current?.disconnect();
     transferRef.current?.reset();
@@ -311,6 +447,8 @@ export default function ReceivePage() {
     setTimeRemainingList([]);
     setReceivedFiles([]);
     setError('');
+    setHandshakeInProgress(false);
+    fileIndexRef.current = 0;
   };
 
   return (
