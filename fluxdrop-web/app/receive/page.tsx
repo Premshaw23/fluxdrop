@@ -2,6 +2,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import JSZip from 'jszip';
 import { ArrowLeft, Download, Check } from 'lucide-react';
 import Link from 'next/link';
 import { SignalingClient } from '@/lib/signaling/SignalingClient';
@@ -13,16 +14,18 @@ type Step = 'enter-code' | 'connecting' | 'receiving' | 'complete';
 export default function ReceivePage() {
   const [step, setStep] = useState<Step>('enter-code');
   const [code, setCode] = useState('');
-  const [metadata, setMetadata] = useState<FileMetadata | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [speed, setSpeed] = useState(0);
-  const [timeRemaining, setTimeRemaining] = useState(0);
-  const [receivedFile, setReceivedFile] = useState<Blob | null>(null);
+  const [batchMetadata, setBatchMetadata] = useState<FileMetadata[]>([]);
+  const [metadataList, setMetadataList] = useState<Array<FileMetadata | null>>([]);
+  const [progressList, setProgressList] = useState<number[]>([]);
+  const [speedList, setSpeedList] = useState<number[]>([]);
+  const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
+  const [receivedFiles, setReceivedFiles] = useState<Blob[]>([]);
   const [error, setError] = useState('');
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferReceiver | null>(null);
+  const fileIndexRef = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -74,21 +77,61 @@ export default function ReceivePage() {
       const transfer = new FileTransferReceiver();
       transferRef.current = transfer;
 
-      transfer.onMetadata = (meta) => {
-        setMetadata(meta);
+      // @ts-ignore: Add missing property for batch metadata event
+      transfer.onBatchMetadata = (batch) => {
+        // Support both { files } and { batchMetadata: { files } } structures
+        const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
+        if (!files) return;
+        setBatchMetadata(files);
+        setMetadataList(files.map(() => null)); // Pre-fill with nulls for correct indexing
+        setProgressList(new Array(files.length).fill(0));
+        setSpeedList(new Array(files.length).fill(0));
+        setTimeRemainingList(new Array(files.length).fill(0));
+        setReceivedFiles(new Array(files.length).fill(null));
+      };
+
+      transfer.onMetadata = (meta: FileMetadata) => {
+        setMetadataList((prev) => {
+          const updated = [...prev];
+          updated[fileIndexRef.current] = meta;
+          return updated;
+        });
         setStep('receiving');
       };
 
-      transfer.onProgress = (prog) => {
-        setProgress(prog.percentage);
-        setSpeed(prog.speed);
-        setTimeRemaining(prog.timeRemaining);
+      transfer.onProgress = (prog: any) => {
+        setProgressList((prev) => {
+          const updated = [...prev];
+          updated[fileIndexRef.current] = prog.percentage;
+          return updated;
+        });
+        setSpeedList((prev) => {
+          const updated = [...prev];
+          updated[fileIndexRef.current] = prog.speed;
+          return updated;
+        });
+        setTimeRemainingList((prev) => {
+          const updated = [...prev];
+          updated[fileIndexRef.current] = prog.timeRemaining;
+          return updated;
+        });
       };
 
-      transfer.onComplete = (file) => {
-        setReceivedFile(file);
-        setStep('complete');
-        setProgress(100);
+      transfer.onComplete = (file: Blob, completedFileIndex: number) => {
+        setReceivedFiles((prev) => {
+          const updated = [...prev];
+          updated[completedFileIndex] = file;
+          console.log('[ReceivePage] setReceivedFiles:', updated);
+          // Always check batchMetadata length and received count
+          const totalFiles = batchMetadata.length || 1;
+          const receivedCount = updated.filter(Boolean).length;
+          if (receivedCount >= totalFiles) {
+            console.log('[ReceivePage] All files received, setting step to complete');
+            setStep('complete');
+          }
+          return updated;
+        });
+        fileIndexRef.current++;
       };
 
       transfer.onError = (err) => {
@@ -97,7 +140,15 @@ export default function ReceivePage() {
 
       // Handle signaling messages
       signaling.on('session-joined', async () => {
+              signaling.on('peer-disconnected', () => {
+                console.warn('[ReceivePage] Peer disconnected');
+                setError('Sender disconnected. Please try again or receive more files.');
+                setStep('enter-code');
+                rtcRef.current?.close();
+                signalingRef.current?.disconnect();
+              });
         console.log('Joined session');
+        setStep('receiving');
       });
 
       // Move offer/ice-candidate handlers here, after RTC is initialized
@@ -112,7 +163,7 @@ export default function ReceivePage() {
       });
 
       signaling.on('error', (message) => {
-        setError(message.error);
+        setError(message.error || 'Session not found or expired. Please check the code and try again.');
         setStep('enter-code');
       });
 
@@ -129,13 +180,12 @@ export default function ReceivePage() {
     }
   };
 
-  const handleDownload = () => {
-    if (!receivedFile || !metadata) return;
-
-    const url = URL.createObjectURL(receivedFile);
+  const handleDownload = (fileIndex: number) => {
+    if (!receivedFiles[fileIndex] || !metadataList[fileIndex]) return;
+    const url = URL.createObjectURL(receivedFiles[fileIndex]);
     const a = document.createElement('a');
     a.href = url;
-    a.download = metadata.name;
+    a.download = metadataList[fileIndex].name;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -146,12 +196,14 @@ export default function ReceivePage() {
     rtcRef.current?.close();
     signalingRef.current?.disconnect();
     transferRef.current?.reset();
-    
     setStep('enter-code');
     setCode('');
-    setMetadata(null);
-    setProgress(0);
-    setReceivedFile(null);
+    setBatchMetadata([]);
+    setMetadataList([]);
+    setProgressList([]);
+    setSpeedList([]);
+    setTimeRemainingList([]);
+    setReceivedFiles([]);
     setError('');
   };
 
@@ -226,31 +278,35 @@ export default function ReceivePage() {
           {/* Receiving */}
           {step === 'receiving' && (
             <div className="bg-white rounded-2xl shadow-xl p-8">
-              <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">Receiving File</h2>
-
-              {metadata && (
+              <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">Receiving Files</h2>
+              {metadataList.length > 0 && (
                 <div className="mb-6">
-                  <p className="font-semibold text-gray-900 mb-1">{metadata.name}</p>
-                  <p className="text-sm text-gray-600">{formatBytes(metadata.size)}</p>
+                  <ul className="space-y-2">
+                    {metadataList.map((meta, idx) => (
+                      meta ? (
+                        <li key={meta.name + meta.size} className="bg-gray-50 rounded-lg px-4 py-2">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="font-semibold text-gray-900">{meta.name}</span>
+                            <span className="text-sm text-gray-600">{formatBytes(meta.size)}</span>
+                          </div>
+                          {/* Progress Bar for each file */}
+                          <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-purple-600 transition-all duration-300"
+                              style={{ width: `${progressList[idx] || 0}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>{Math.round(progressList[idx] || 0)}%</span>
+                            <span>{formatSpeed(speedList[idx] || 0)}</span>
+                            <span>{timeRemainingList[idx] > 0 ? `${formatTime(timeRemainingList[idx])} left` : ''}</span>
+                          </div>
+                        </li>
+                      ) : null
+                    ))}
+                  </ul>
                 </div>
               )}
-
-              {/* Progress Bar */}
-              <div className="mb-6">
-                <div className="flex justify-between text-sm text-gray-600 mb-2">
-                  <span>{Math.round(progress)}%</span>
-                  <span>{formatSpeed(speed)}</span>
-                </div>
-                <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-purple-600 transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <div className="text-center text-sm text-gray-500 mt-2">
-                  {timeRemaining > 0 && `${formatTime(timeRemaining)} remaining`}
-                </div>
-              </div>
             </div>
           )}
 
@@ -262,30 +318,70 @@ export default function ReceivePage() {
                   <Check className="w-10 h-10 text-green-600" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900 mb-2">Transfer Complete!</h2>
-                <p className="text-gray-600">Your file is ready to download</p>
+                <p className="text-gray-600">Your files are ready to download</p>
               </div>
-
-              {metadata && (
-                <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                  <p className="font-semibold text-gray-900 mb-1">{metadata.name}</p>
-                  <p className="text-sm text-gray-600">{formatBytes(metadata.size)}</p>
-                </div>
-              )}
-
+              <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                <ul className="space-y-2">
+                  {metadataList.map((meta, idx) => (
+                    meta && receivedFiles[idx] ? (
+                      <li key={meta.name + meta.size} className="flex justify-between items-center">
+                        <span className="font-semibold text-gray-900">{meta.name}</span>
+                        <span className="text-sm text-gray-600">{formatBytes(meta.size)}</span>
+                        <button
+                          onClick={() => { console.log('[ReceivePage] Download clicked for', idx, receivedFiles[idx]); handleDownload(idx); }}
+                          className="ml-4 bg-purple-600 text-white py-1 px-3 rounded hover:bg-purple-700 text-xs font-semibold flex items-center gap-1"
+                        >
+                          <Download className="w-4 h-4" />
+                          Download
+                        </button>
+                        <button
+                          onClick={() => {
+                            setReceivedFiles((prev) => prev.filter((_, i) => i !== idx));
+                            setMetadataList((prev) => prev.filter((_, i) => i !== idx));
+                          }}
+                          className="ml-2 bg-red-100 text-red-700 py-1 px-2 rounded hover:bg-red-200 text-xs font-semibold"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ) : (
+                      <li key={idx} className="flex justify-between items-center opacity-50">
+                        <span className="font-semibold text-gray-400">File not ready</span>
+                      </li>
+                    )
+                  ))}
+                </ul>
+              </div>
               <div className="space-y-3">
                 <button
-                  onClick={handleDownload}
-                  className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold flex items-center justify-center gap-2"
+                  onClick={async () => {
+                    if (!receivedFiles.length) return;
+                    const zip = new JSZip();
+                    receivedFiles.forEach((file, idx) => {
+                      const meta = metadataList[idx];
+                      if (file && meta) {
+                        zip.file(meta.name, file);
+                      }
+                    });
+                    const content = await zip.generateAsync({ type: 'blob' });
+                    const url = URL.createObjectURL(content);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'fluxdrop-files.zip';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold"
                 >
-                  <Download className="w-5 h-5" />
-                  Download File
+                  Download All as ZIP
                 </button>
-                
                 <button
                   onClick={reset}
                   className="w-full bg-white border border-gray-300 text-gray-700 py-3 px-6 rounded-lg hover:bg-gray-50 transition-colors font-semibold"
                 >
-                  Receive Another File
+                  Receive More Files
                 </button>
               </div>
             </div>

@@ -1,6 +1,9 @@
+export interface BatchMetadata {
+  files: FileMetadata[];
+}
 // fluxdrop-web/lib/transfer/FileTransfer.ts
 
-const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 
 export interface FileMetadata {
   name: string;
@@ -20,13 +23,65 @@ export interface TransferProgress {
 }
 
 interface ChunkMessage {
-  type: 'metadata' | 'chunk' | 'complete';
+  type: 'batch-metadata' | 'metadata' | 'chunk' | 'complete';
+  batchMetadata?: BatchMetadata;
   metadata?: FileMetadata;
   chunkIndex?: number;
   data?: ArrayBuffer;
 }
 
 export class FileTransferSender {
+    private files: File[] = [];
+    private _fileIndex = 0;
+    public get fileIndex() {
+      return this._fileIndex;
+    }
+
+    /**
+     * Start batch transfer for multiple files
+     */
+    public async startBatchTransfer(files: File[]) {
+      this.files = files;
+      this._fileIndex = 0;
+      this.isCancelled = false;
+
+      // Send batch metadata first
+      const batchMetadata = {
+        files: files.map(f => ({
+          name: f.name,
+          size: f.size,
+          type: f.type,
+          chunks: Math.ceil(f.size / CHUNK_SIZE)
+        }))
+      };
+      this.sendMessage({ type: 'batch-metadata', batchMetadata });
+
+      await this.startNextFile();
+    }
+
+    private async startNextFile() {
+      if (this._fileIndex >= this.files.length) {
+        this.onComplete?.();
+        return;
+      }
+      const file = this.files[this._fileIndex];
+      this.file = file;
+      this.chunks = this.createChunks(file);
+      this.currentChunk = 0;
+      this.bytesSent = 0;
+      this.startTime = Date.now();
+
+      // Send metadata for this file
+      const metadata: FileMetadata = {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        chunks: this.chunks.length
+      };
+      this.sendMessage({ type: 'metadata', metadata });
+
+      await this.sendNextChunk();
+    }
   private file: File | null = null;
   private chunks: Blob[] = [];
   private currentChunk = 0;
@@ -40,7 +95,8 @@ export class FileTransferSender {
 
   constructor(
     private sendData: (data: ArrayBuffer | Uint8Array) => boolean,
-    private getBufferedAmount: () => number
+    private getBufferedAmount: () => number,
+    private getDataChannelState?: () => string
   ) {}
 
   async startTransfer(file: File) {
@@ -86,12 +142,12 @@ export class FileTransferSender {
       return;
     }
 
-    if (this.currentChunk >= this.chunks.length) {
-      this.sendMessage({ type: 'complete' });
-      this.onComplete?.();
-      console.log('✅ Transfer complete');
-      return;
-    }
+      if (this.currentChunk >= this.chunks.length) {
+        this.sendMessage({ type: 'complete' });
+        this._fileIndex++;
+        await this.startNextFile();
+        return;
+      }
 
     // Check buffer - wait if too much data is buffered
     const buffered = this.getBufferedAmount();
@@ -142,6 +198,11 @@ export class FileTransferSender {
   }
 
   private sendMessage(message: ChunkMessage) {
+    // Check if data channel is open before sending
+    if (this.getDataChannelState && this.getDataChannelState() !== 'open') {
+      console.warn('[FileTransferSender] Data channel not open, aborting send');
+      return;
+    }
     const encoder = new TextEncoder();
     const json = JSON.stringify({
       type: message.type,
@@ -184,8 +245,9 @@ export class FileTransferReceiver {
 
   public onMetadata?: (metadata: FileMetadata) => void;
   public onProgress?: (progress: TransferProgress) => void;
-  public onComplete?: (file: Blob) => void;
+    public onComplete?: (file: Blob, fileIndex: number) => void;
   public onError?: (error: Error) => void;
+  public onBatchMetadata?: (batchMetadata: BatchMetadata) => void;
 
   handleMessage(data: ArrayBuffer) {
     console.log('[FileTransferReceiver] Received message, bytes:', data.byteLength);
@@ -193,6 +255,12 @@ export class FileTransferReceiver {
     console.log('[FileTransferReceiver] Parsed message:', message);
 
     switch (message.type) {
+      case 'batch-metadata':
+        if (this.onBatchMetadata) {
+          this.currentFileIndex = 0; // Reset file index for new batch
+          this.onBatchMetadata(message.batchMetadata!);
+        }
+        break;
       case 'metadata':
         this.handleMetadata(message.metadata!);
         break;
@@ -270,6 +338,7 @@ export class FileTransferReceiver {
     this.onProgress?.(progress);
   }
 
+  private currentFileIndex = 0;
   private handleComplete() {
     if (!this.metadata) {
       this.onError?.(new Error('No metadata received'));
@@ -289,7 +358,11 @@ export class FileTransferReceiver {
 
     const blob = new Blob(chunks, { type: this.metadata.type });
     console.log('✅ Transfer complete, file reconstructed');
-    this.onComplete?.(blob);
+    if (typeof this.onComplete === 'function') {
+      this.onComplete(blob, this.currentFileIndex);
+    }
+    this.currentFileIndex++;
+    // Wait for next metadata to start next file
   }
 
   reset() {
