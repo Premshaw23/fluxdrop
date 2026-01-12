@@ -3,7 +3,7 @@ export interface BatchMetadata {
 }
 // fluxdrop-web/lib/transfer/FileTransfer.ts
 
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+const CHUNK_SIZE = 192 * 1024; // 192KB chunks for speed/reliability balance
 
 export interface FileMetadata {
   name: string;
@@ -149,10 +149,10 @@ export class FileTransferSender {
         return;
       }
 
-    // Check buffer - wait if too much data is buffered
+    // Even stricter throttling: only send if buffer is very low
     const buffered = this.getBufferedAmount();
     if (buffered > CHUNK_SIZE * 2) {
-      setTimeout(() => this.sendNextChunk(), 100);
+      setTimeout(() => this.sendNextChunk(), 120);
       return;
     }
 
