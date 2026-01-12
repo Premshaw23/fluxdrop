@@ -112,6 +112,7 @@ export class SignalingClient {
     this.send({ type: 'join-session', code });
   }
 
+
   sendOffer(sdp: string) {
     this.send({ type: 'offer', sdp });
   }
@@ -129,6 +130,13 @@ export class SignalingClient {
         sdpMid: candidate.sdpMid
       }
     });
+  }
+
+  /**
+   * Send ECDH public key (Uint8Array or base64 string)
+   */
+  sendPublicKey(publicKey: string) {
+    this.send({ type: 'public-key', publicKey });
   }
 
   disconnect() {

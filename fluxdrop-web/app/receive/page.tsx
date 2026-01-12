@@ -8,19 +8,29 @@ import Link from 'next/link';
 import { SignalingClient } from '@/lib/signaling/SignalingClient';
 import { RTCConnection } from '@/lib/webrtc/RTCConnection';
 import { FileTransferReceiver, FileMetadata, formatBytes, formatSpeed, formatTime } from '@/lib/transfer/FileTransfer';
+import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecret } from '@/lib/crypto/crypto';
 
 type Step = 'enter-code' | 'connecting' | 'receiving' | 'complete';
 
 export default function ReceivePage() {
+  // ECDH state
+  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
+  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
+  const sharedSecretRef = useRef<CryptoKey | null>(null);
   const [step, setStep] = useState<Step>('enter-code');
   const [code, setCode] = useState('');
   const [batchMetadata, setBatchMetadata] = useState<FileMetadata[]>([]);
-  const [metadataList, setMetadataList] = useState<Array<FileMetadata | null>>([]);
+  const [metadataList, setMetadataList] = useState<(FileMetadata | null)[]>([]);
   const [progressList, setProgressList] = useState<number[]>([]);
   const [speedList, setSpeedList] = useState<number[]>([]);
   const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
-  const [receivedFiles, setReceivedFiles] = useState<Blob[]>([]);
+  const [receivedFiles, setReceivedFiles] = useState<(Blob | null)[]>([]);
   const [error, setError] = useState('');
+  // Add a handshake-in-progress state
+  const [handshakeInProgress, setHandshakeInProgress] = useState(false);
+
+  // Add state to store file debug info
+  const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
@@ -39,9 +49,9 @@ export default function ReceivePage() {
       setError('Please enter a 6-digit code');
       return;
     }
-
     setStep('connecting');
     setError('');
+    setHandshakeInProgress(true);
 
     try {
       // Connect to signaling server
@@ -73,82 +83,160 @@ export default function ReceivePage() {
 
       await rtc.initialize('receiver');
 
-      // Setup transfer receiver
-      const transfer = new FileTransferReceiver();
-      transferRef.current = transfer;
-
-      // @ts-ignore: Add missing property for batch metadata event
-      transfer.onBatchMetadata = (batch) => {
-        // Support both { files } and { batchMetadata: { files } } structures
-        const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
-        if (!files) return;
-        setBatchMetadata(files);
-        setMetadataList(files.map(() => null)); // Pre-fill with nulls for correct indexing
-        setProgressList(new Array(files.length).fill(0));
-        setSpeedList(new Array(files.length).fill(0));
-        setTimeRemainingList(new Array(files.length).fill(0));
-        setReceivedFiles(new Array(files.length).fill(null));
+      // Defer FileTransferReceiver setup until shared secret is derived
+      let transfer: FileTransferReceiver | null = null;
+      const setupTransferReceiver = () => {
+        if (!sharedSecretRef.current) {
+          setError('Encryption handshake not complete. Please wait for the connection to establish before receiving files.');
+          console.error('[ReceivePage] Cannot start receiving: shared secret not set.');
+          return;
+        }
+        // Set up transfer and handlers synchronously before any messages can arrive
+        transfer = new FileTransferReceiver();
+        transfer.setDecryptionKey(sharedSecretRef.current);
+        transferRef.current = transfer;
+        // Attach all handlers immediately
+        transfer.onBatchMetadata = (batch) => {
+          const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
+          console.log('[ReceivePage] onBatchMetadata called:', batch, files);
+          if (!files) return;
+          setBatchMetadata((prev) => {
+            if (prev.length === 0) {
+              console.log('[ReceivePage] setBatchMetadata:', files);
+              return files;
+            } else {
+              return prev;
+            }
+          });
+          setMetadataList(files.map(() => null));
+          setProgressList(new Array(files.length).fill(0));
+          setSpeedList(new Array(files.length).fill(0));
+          setTimeRemainingList(new Array(files.length).fill(0));
+          setReceivedFiles(new Array(files.length).fill(null));
+          fileIndexRef.current = 0; // Reset file index for new batch
+        };
+        transfer.onMetadata = (meta: FileMetadata) => {
+          setMetadataList((prev) => {
+            const updated = [...prev];
+            // Find the index in batchMetadata that matches this meta
+            let idx = batchMetadata.findIndex(
+              (m) => m.name === meta.name && m.size === meta.size && m.type === meta.type
+            );
+            // Fallback: first null slot
+            if (idx === -1) idx = updated.findIndex((m) => m === null);
+            // Fallback: fileIndexRef
+            if (idx === -1) idx = fileIndexRef.current;
+            updated[idx] = meta;
+            return updated;
+          });
+          setStep('receiving');
+        };
+        transfer.onProgress = (prog: any) => {
+          setProgressList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.percentage;
+            return updated;
+          });
+          setSpeedList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.speed;
+            return updated;
+          });
+          setTimeRemainingList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.timeRemaining;
+            return updated;
+          });
+        };
+        transfer.onComplete = async (file: Blob, completedFileIndex: number) => {
+          // Calculate SHA-256 and hex preview
+          const arrayBuffer = await file.arrayBuffer();
+          const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+          const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+          const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+          setFileDebugInfo((prev) => {
+            const updated = [...prev];
+            updated[completedFileIndex] = {
+              hash: hashB64,
+              type: file.type,
+              size: file.size,
+              hex
+            };
+            return updated;
+          });
+          // Ensure metadataList is set for this file
+          setMetadataList((prev) => {
+            const updated = [...prev];
+            if (!updated[completedFileIndex] && batchMetadata[completedFileIndex]) {
+              updated[completedFileIndex] = batchMetadata[completedFileIndex];
+            }
+            return updated;
+          });
+          setReceivedFiles((prev) => {
+            const updated = [...prev];
+            updated[completedFileIndex] = file;
+            console.log('[ReceivePage] setReceivedFiles:', updated);
+            const totalFiles = batchMetadata.length || 1;
+            const receivedCount = updated.filter(Boolean).length;
+            if (receivedCount >= totalFiles) {
+              console.log('[ReceivePage] All files received, setting step to complete');
+              setStep('complete');
+              ecdhKeyPairRef.current = null;
+              peerPublicKeyRef.current = null;
+              sharedSecretRef.current = null;
+            }
+            return updated;
+          });
+          fileIndexRef.current++;
+        };
+        transfer.onError = (err) => {
+          setError(err.message);
+          ecdhKeyPairRef.current = null;
+          peerPublicKeyRef.current = null;
+          sharedSecretRef.current = null;
+        };
       };
-
-      transfer.onMetadata = (meta: FileMetadata) => {
-        setMetadataList((prev) => {
-          const updated = [...prev];
-          updated[fileIndexRef.current] = meta;
-          return updated;
-        });
-        setStep('receiving');
+      // Wait for shared secret, then setup transfer receiver
+      const waitForSharedSecret = () => {
+        if (sharedSecretRef.current) {
+          setHandshakeInProgress(false);
+          // Set up transfer receiver synchronously before any messages can arrive
+          setupTransferReceiver();
+        } else {
+          setTimeout(waitForSharedSecret, 50);
+        }
       };
-
-      transfer.onProgress = (prog: any) => {
-        setProgressList((prev) => {
-          const updated = [...prev];
-          updated[fileIndexRef.current] = prog.percentage;
-          return updated;
-        });
-        setSpeedList((prev) => {
-          const updated = [...prev];
-          updated[fileIndexRef.current] = prog.speed;
-          return updated;
-        });
-        setTimeRemainingList((prev) => {
-          const updated = [...prev];
-          updated[fileIndexRef.current] = prog.timeRemaining;
-          return updated;
-        });
-      };
-
-      transfer.onComplete = (file: Blob, completedFileIndex: number) => {
-        setReceivedFiles((prev) => {
-          const updated = [...prev];
-          updated[completedFileIndex] = file;
-          console.log('[ReceivePage] setReceivedFiles:', updated);
-          // Always check batchMetadata length and received count
-          const totalFiles = batchMetadata.length || 1;
-          const receivedCount = updated.filter(Boolean).length;
-          if (receivedCount >= totalFiles) {
-            console.log('[ReceivePage] All files received, setting step to complete');
-            setStep('complete');
-          }
-          return updated;
-        });
-        fileIndexRef.current++;
-      };
-
-      transfer.onError = (err) => {
-        setError(err.message);
-      };
+      waitForSharedSecret();
 
       // Handle signaling messages
+
       signaling.on('session-joined', async () => {
-              signaling.on('peer-disconnected', () => {
-                console.warn('[ReceivePage] Peer disconnected');
-                setError('Sender disconnected. Please try again or receive more files.');
-                setStep('enter-code');
-                rtcRef.current?.close();
-                signalingRef.current?.disconnect();
-              });
-        console.log('Joined session');
+        signaling.on('peer-disconnected', () => {
+          console.warn('[ReceivePage] Peer disconnected');
+          setError('Sender disconnected. Please try again or receive more files.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+        });
+        // ECDH: generate key pair and send public key
+        const keyPair = await generateECDHKeyPair();
+        ecdhKeyPairRef.current = keyPair;
+        const exported = await exportPublicKey(keyPair.publicKey);
+        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+        signaling.sendPublicKey(pubKeyB64);
+        console.log('Joined session, public key sent');
         setStep('receiving');
+      });
+
+      signaling.on('public-key', async (message) => {
+        // Receive peer's public key, import, and derive shared secret
+        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
+        const peerKey = await importPublicKey(raw.buffer);
+        peerPublicKeyRef.current = peerKey;
+        if (ecdhKeyPairRef.current) {
+          sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
+          console.log('[ReceivePage] Shared secret derived');
+        }
       });
 
       // Move offer/ice-candidate handlers here, after RTC is initialized
@@ -177,15 +265,30 @@ export default function ReceivePage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect');
       setStep('enter-code');
+      setHandshakeInProgress(false);
     }
   };
 
+  const getFallbackMeta = (file: Blob | null, idx: number) => {
+    if (!file) return null;
+    return {
+      name: `File_${idx + 1}.${(file.type && file.type.split('/')[1]) || 'bin'}`,
+      size: file.size,
+      type: file.type || 'application/octet-stream',
+      chunks: 1
+    };
+  };
+
   const handleDownload = (fileIndex: number) => {
-    if (!receivedFiles[fileIndex] || !metadataList[fileIndex]) return;
-    const url = URL.createObjectURL(receivedFiles[fileIndex]);
+    const file = receivedFiles[fileIndex];
+    let meta = metadataList[fileIndex];
+    if (!file) return;
+    if (!meta) meta = getFallbackMeta(file, fileIndex);
+    if (!meta) return;
+    const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
-    a.download = metadataList[fileIndex].name;
+    a.download = meta.name;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -218,7 +321,15 @@ export default function ReceivePage() {
           </Link>
         </div>
       </header>
-
+      {/* Handshake progress indicator */}
+      {handshakeInProgress && (
+        <div className="flex flex-col items-center justify-center mt-8">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
+          <p className="text-purple-700 font-semibold text-lg">Establishing secure connection…</p>
+          <p className="text-gray-500 text-sm mt-2">Waiting for encryption handshake to complete…</p>
+        </div>
+      )}
+      {/* ...existing code... */}
       <main className="container mx-auto px-4 py-16">
         <div className="max-w-2xl mx-auto">
           {/* Error Message */}
@@ -320,36 +431,100 @@ export default function ReceivePage() {
                 <h2 className="text-3xl font-bold text-gray-900 mb-2">Transfer Complete!</h2>
                 <p className="text-gray-600">Your files are ready to download</p>
               </div>
+                {/* DEBUG: Show state arrays for troubleshooting */}
+                <div className="mb-4 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-900">
+                  <div><b>batchMetadata:</b> {JSON.stringify(batchMetadata)}</div>
+                  <div><b>metadataList:</b> {JSON.stringify(metadataList)}</div>
+                  <div><b>receivedFiles:</b> {JSON.stringify(receivedFiles.map(f => f ? {size: f.size, type: f.type} : null))}</div>
+                </div>
               <div className="bg-gray-50 rounded-lg p-4 mb-6">
                 <ul className="space-y-2">
-                  {metadataList.map((meta, idx) => (
-                    meta && receivedFiles[idx] ? (
-                      <li key={meta.name + meta.size} className="flex justify-between items-center">
-                        <span className="font-semibold text-gray-900">{meta.name}</span>
-                        <span className="text-sm text-gray-600">{formatBytes(meta.size)}</span>
-                        <button
-                          onClick={() => { console.log('[ReceivePage] Download clicked for', idx, receivedFiles[idx]); handleDownload(idx); }}
-                          className="ml-4 bg-purple-600 text-white py-1 px-3 rounded hover:bg-purple-700 text-xs font-semibold flex items-center gap-1"
-                        >
-                          <Download className="w-4 h-4" />
-                          Download
-                        </button>
-                        <button
-                          onClick={() => {
-                            setReceivedFiles((prev) => prev.filter((_, i) => i !== idx));
-                            setMetadataList((prev) => prev.filter((_, i) => i !== idx));
-                          }}
-                          className="ml-2 bg-red-100 text-red-700 py-1 px-2 rounded hover:bg-red-200 text-xs font-semibold"
-                        >
-                          Remove
-                        </button>
+                  {Array.from({ length: Math.max(metadataList.length, receivedFiles.length) }).map((_, idx) => {
+                    // Use the largest length among batchMetadata, metadataList, receivedFiles
+                    const maxLen = Math.max(batchMetadata.length, metadataList.length, receivedFiles.length);
+                    let meta = (batchMetadata[idx] || metadataList[idx]) || null;
+                    const file = receivedFiles[idx] || null;
+                    // If file exists but no metadata, create fallback metadata
+                    if (!meta && file) {
+                      meta = {
+                        name: `File_${idx + 1}.${(file.type && file.type.split('/')[1]) || 'bin'}`,
+                        size: file.size,
+                        type: file.type || 'application/octet-stream',
+                        chunks: 1
+                      };
+                    }
+                    if (!meta) {
+                      return (
+                        <li key={idx} className="flex justify-between items-center opacity-50">
+                          <span className="font-semibold text-gray-400">File not ready</span>
+                        </li>
+                      );
+                    }
+                    const url = file ? URL.createObjectURL(file) : undefined;
+                    const isImage = meta.type && meta.type.startsWith('image/');
+                    return (
+                      <li key={meta.name + meta.size} className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div className="flex flex-col gap-1 md:flex-row md:items-center">
+                          <span className={file ? "font-semibold text-gray-900" : "font-semibold text-gray-400 line-through"}>{meta.name}</span>
+                          <span className="text-sm text-gray-600 md:ml-4">{formatBytes(meta.size)}</span>
+                        </div>
+                        <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+                          {file ? (
+                            <>
+                              {isImage && url && (
+                                <img
+                                  src={url}
+                                  alt={meta.name}
+                                  style={{ maxWidth: 120, maxHeight: 80, borderRadius: 8, border: '1px solid #eee' }}
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                              )}
+                              <button
+                                onClick={() => { handleDownload(idx); }}
+                                className="bg-purple-600 text-white py-1 px-3 rounded hover:bg-purple-700 text-xs font-semibold flex items-center gap-1"
+                              >
+                                <Download className="w-4 h-4" />
+                                Download
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setReceivedFiles((prev) => {
+                                    const updated = [...prev];
+                                    updated[idx] = null;
+                                    return updated;
+                                  });
+                                  setMetadataList((prev) => {
+                                    const updated = [...prev];
+                                    updated[idx] = null;
+                                    return updated;
+                                  });
+                                }}
+                                className="bg-red-100 text-red-700 py-1 px-2 rounded hover:bg-red-200 text-xs font-semibold"
+                              >
+                                Remove
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-xs text-red-500 font-semibold">Removed</span>
+                              <button
+                                onClick={() => {
+                                  setMetadataList((prev) => {
+                                    const updated = [...prev];
+                                    updated[idx] = prev[idx];
+                                    return updated;
+                                  });
+                                }}
+                                className="bg-gray-200 text-gray-700 py-1 px-2 rounded hover:bg-gray-300 text-xs font-semibold"
+                              >
+                                Restore
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </li>
-                    ) : (
-                      <li key={idx} className="flex justify-between items-center opacity-50">
-                        <span className="font-semibold text-gray-400">File not ready</span>
-                      </li>
-                    )
-                  ))}
+                    );
+                  })}
                 </ul>
               </div>
               <div className="space-y-3">
@@ -358,7 +533,8 @@ export default function ReceivePage() {
                     if (!receivedFiles.length) return;
                     const zip = new JSZip();
                     receivedFiles.forEach((file, idx) => {
-                      const meta = metadataList[idx];
+                      let meta = metadataList[idx];
+                      if (!meta && file) meta = getFallbackMeta(file, idx);
                       if (file && meta) {
                         zip.file(meta.name, file);
                       }
@@ -386,6 +562,8 @@ export default function ReceivePage() {
               </div>
             </div>
           )}
+
+          {/* Debug UI removed */}
         </div>
       </main>
     </div>

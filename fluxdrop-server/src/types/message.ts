@@ -21,6 +21,7 @@ const AnswerSchema = z.object({
   sdp: z.string()
 });
 
+
 const IceCandidateSchema = z.object({
   type: z.literal('ice-candidate'),
   candidate: z.object({
@@ -30,12 +31,19 @@ const IceCandidateSchema = z.object({
   })
 });
 
+const PublicKeySchema = z.object({
+  type: z.literal('public-key'),
+  publicKey: z.string()
+});
+
+
 export const SignalingMessageSchema = z.discriminatedUnion('type', [
   CreateSessionSchema,
   JoinSessionSchema,
   OfferSchema,
   AnswerSchema,
-  IceCandidateSchema
+  IceCandidateSchema,
+  PublicKeySchema
 ]);
 
 export type SignalingMessage = z.infer<typeof SignalingMessageSchema>;

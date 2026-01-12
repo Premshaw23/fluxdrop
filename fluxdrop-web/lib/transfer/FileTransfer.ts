@@ -1,3 +1,4 @@
+import { encryptAESGCM, sha256, decryptAESGCM } from '../crypto/crypto';
 export interface BatchMetadata {
   files: FileMetadata[];
 }
@@ -28,36 +29,44 @@ interface ChunkMessage {
   metadata?: FileMetadata;
   chunkIndex?: number;
   data?: ArrayBuffer;
+  iv?: number[]; // for encrypted chunks
+  hash?: string; // base64-encoded SHA-256 hash
 }
 
 export class FileTransferSender {
-    private files: File[] = [];
-    private _fileIndex = 0;
-    public get fileIndex() {
-      return this._fileIndex;
-    }
+  private encryptionKey: CryptoKey | null = null;
 
-    /**
-     * Start batch transfer for multiple files
-     */
-    public async startBatchTransfer(files: File[]) {
-      this.files = files;
-      this._fileIndex = 0;
-      this.isCancelled = false;
+  /**
+   * Optionally set an AES-GCM key for encrypting chunks
+   */
+  setEncryptionKey(key: CryptoKey) {
+    this.encryptionKey = key;
+  }
+  private files: File[] = [];
+  private _fileIndex = 0;
+  public get fileIndex() {
+    return this._fileIndex;
+  }
 
-      // Send batch metadata first
-      const batchMetadata = {
-        files: files.map(f => ({
-          name: f.name,
-          size: f.size,
-          type: f.type,
-          chunks: Math.ceil(f.size / CHUNK_SIZE)
-        }))
-      };
-      this.sendMessage({ type: 'batch-metadata', batchMetadata });
-
-      await this.startNextFile();
-    }
+  /**
+   * Start batch transfer for multiple files
+   */
+  public async startBatchTransfer(files: File[]) {
+    this.files = files;
+    this._fileIndex = 0;
+    // Prepare batch metadata
+    const batchMetadata: BatchMetadata = {
+      files: files.map(f => ({
+        name: f.name,
+        size: f.size,
+        type: f.type,
+        chunks: Math.ceil(f.size / CHUNK_SIZE)
+      }))
+    };
+    console.log('[FileTransferSender] Sending batch-metadata:', batchMetadata);
+    this.sendMessage({ type: 'batch-metadata', batchMetadata });
+    await this.startNextFile();
+  }
 
     private async startNextFile() {
       if (this._fileIndex >= this.files.length) {
@@ -126,13 +135,19 @@ export class FileTransferSender {
   private createChunks(file: File): Blob[] {
     const chunks: Blob[] = [];
     let offset = 0;
-
+    let chunkIndex = 0;
     while (offset < file.size) {
-      const chunk = file.slice(offset, offset + CHUNK_SIZE);
+      const end = Math.min(offset + CHUNK_SIZE, file.size);
+      const chunk = file.slice(offset, end);
+      // Log detailed chunk slicing info
+      console.log(`[FileTransferSender] createChunks: chunk ${chunkIndex}, offset: ${offset}, end: ${end}, size: ${chunk.size}`);
       chunks.push(chunk);
-      offset += CHUNK_SIZE;
+      offset = end;
+      chunkIndex++;
     }
-
+    // Log total chunks and file size
+    const totalSize = chunks.reduce((acc, c) => acc + c.size, 0);
+    console.log(`[FileTransferSender] createChunks: total chunks: ${chunks.length}, file.size: ${file.size}, sum(chunk.size): ${totalSize}`);
     return chunks;
   }
 
@@ -157,13 +172,34 @@ export class FileTransferSender {
     }
 
     const chunk = this.chunks[this.currentChunk];
-    const arrayBuffer = await chunk.arrayBuffer();
+    let arrayBuffer = await chunk.arrayBuffer();
+    // Log first 16 bytes of chunk before encryption
+    const preEncHex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.log(`[FileTransferSender] Chunk ${this.currentChunk} pre-encryption first 16 bytes: ${preEncHex}`);
+    // Compute SHA-256 hash (base64) on unencrypted chunk
+    const hashBuffer = await sha256(arrayBuffer);
+    const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+    let iv: Uint8Array | undefined = undefined;
+    if (this.encryptionKey) {
+      // Generate random 12-byte IV
+      const ivRaw = window.crypto.getRandomValues(new Uint8Array(12));
+      iv = new Uint8Array(ivRaw.buffer.slice(0)); // Ensure iv is a plain Uint8Array backed by ArrayBuffer
+      arrayBuffer = await encryptAESGCM(this.encryptionKey, arrayBuffer, iv as BufferSource);
+      // Log first 16 bytes after encryption
+      const postEncHex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[FileTransferSender] Chunk ${this.currentChunk} post-encryption first 16 bytes: ${postEncHex}`);
+    }
 
-    // Send chunk with index
+    // Log chunk info
+    console.log(`[FileTransferSender] Sending chunk ${this.currentChunk}/${this.chunks.length - 1}, size: ${arrayBuffer.byteLength}`);
+
+    // Send chunk with index, IV (if encrypted), and hash
     this.sendMessage({
       type: 'chunk',
       chunkIndex: this.currentChunk,
-      data: arrayBuffer
+      data: arrayBuffer,
+      ...(iv ? { iv: Array.from(iv) } : {}),
+      hash: hashB64
     });
 
     this.bytesSent += arrayBuffer.byteLength;
@@ -204,16 +240,21 @@ export class FileTransferSender {
       return;
     }
     const encoder = new TextEncoder();
-    const json = JSON.stringify({
+    // Build header with all relevant fields
+    const headerObj: any = {
       type: message.type,
       metadata: message.metadata,
       chunkIndex: message.chunkIndex
-    });
+    };
+    if (message.iv) headerObj.iv = message.iv;
+    if (message.hash) headerObj.hash = message.hash;
+    if (message.batchMetadata) headerObj.batchMetadata = message.batchMetadata;
 
+    const json = JSON.stringify(headerObj);
     // Send header
     const header = encoder.encode(json);
     const headerLength = new Uint32Array([header.length]);
-    
+
     if (message.data) {
       // Send: [header length (4 bytes)][header][data]
       const combined = new Uint8Array(4 + header.length + message.data.byteLength);
@@ -238,6 +279,14 @@ export class FileTransferSender {
 }
 
 export class FileTransferReceiver {
+  private decryptionKey: CryptoKey | null = null;
+
+  /**
+   * Optionally set an AES-GCM key for decrypting chunks
+   */
+  setDecryptionKey(key: CryptoKey) {
+    this.decryptionKey = key;
+  }
   private metadata: FileMetadata | null = null;
   private receivedChunks = new Map<number, ArrayBuffer>();
   private startTime = 0;
@@ -249,13 +298,14 @@ export class FileTransferReceiver {
   public onError?: (error: Error) => void;
   public onBatchMetadata?: (batchMetadata: BatchMetadata) => void;
 
-  handleMessage(data: ArrayBuffer) {
+  async handleMessage(data: ArrayBuffer) {
     console.log('[FileTransferReceiver] Received message, bytes:', data.byteLength);
     const message = this.parseMessage(data);
     console.log('[FileTransferReceiver] Parsed message:', message);
 
     switch (message.type) {
       case 'batch-metadata':
+        console.log('[FileTransferReceiver] batch-metadata handler:', message, message.batchMetadata);
         if (this.onBatchMetadata) {
           this.currentFileIndex = 0; // Reset file index for new batch
           this.onBatchMetadata(message.batchMetadata!);
@@ -265,10 +315,10 @@ export class FileTransferReceiver {
         this.handleMetadata(message.metadata!);
         break;
       case 'chunk':
-        this.handleChunk(message.chunkIndex!, message.data!);
+        await this.handleChunk(message.chunkIndex!, message.data!, message.iv, message.hash);
         break;
       case 'complete':
-        this.handleComplete();
+        await this.handleComplete();
         break;
       default:
         console.warn('[FileTransferReceiver] Unknown message type:', message.type);
@@ -286,13 +336,13 @@ export class FileTransferReceiver {
     if (header.type === 'chunk') {
       const chunkData = data.slice(4 + headerLength);
       return {
-        type: 'chunk',
-        chunkIndex: header.chunkIndex,
+        ...header,
         data: chunkData
       };
     }
 
-    return header;
+    // For non-chunk messages, return all header properties (not just type)
+    return { ...header };
   }
 
   private handleMetadata(metadata: FileMetadata) {
@@ -305,15 +355,58 @@ export class FileTransferReceiver {
     this.onMetadata?.(metadata);
   }
 
-  private handleChunk(index: number, data: ArrayBuffer) {
+  private async handleChunk(index: number, data: ArrayBuffer, iv?: number[], hash?: string) {
     if (!this.metadata) {
       console.error('❌ Received chunk before metadata');
       return;
     }
 
-    this.receivedChunks.set(index, data);
-    this.bytesReceived += data.byteLength;
-
+    let chunkData: ArrayBuffer;
+    // Log decryption key and IV presence
+    console.log(`[FileTransferReceiver] handleChunk: index=${index}, hasDecryptionKey=${!!this.decryptionKey}, hasIV=${!!iv}, IV=`, iv);
+    if (this.decryptionKey && iv) {
+      // Log first 16 bytes before decryption
+      const preDecHex = Array.from(new Uint8Array(data).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[FileTransferReceiver] Chunk ${index} pre-decryption first 16 bytes: ${preDecHex}`);
+      try {
+        chunkData = await decryptAESGCM(this.decryptionKey, data, new Uint8Array(iv));
+        // Log first 16 bytes after decryption
+        const postDecHex = Array.from(new Uint8Array(chunkData).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        console.log(`[FileTransferReceiver] Chunk ${index} post-decryption first 16 bytes: ${postDecHex}`);
+      } catch (e) {
+        console.error('❌ Decryption failed for chunk', index, e);
+        this.onError?.(new Error('Decryption failed for chunk ' + index));
+        return;
+      }
+    } else if (!this.decryptionKey && iv) {
+      // Encrypted chunk but no decryption key: error
+      console.warn(`[FileTransferReceiver] Warning: Received encrypted chunk but no decryption key for chunk ${index}`);
+      chunkData = data;
+    } else if (this.decryptionKey && !iv) {
+      // Decryption key present but IV missing
+      console.warn(`[FileTransferReceiver] Warning: Decryption key present but IV missing for chunk ${index}`);
+      chunkData = data;
+    } else {
+      // Not encrypted
+      console.log(`[FileTransferReceiver] Info: Not encrypted, storing raw chunk for index ${index}`);
+      chunkData = data;
+    }
+    // Verify SHA-256 hash if provided
+    if (hash) {
+      const hashBuffer = await sha256(chunkData);
+      const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+      if (hashB64 !== hash) {
+        console.error('❌ Chunk integrity check failed for chunk', index, { expected: hash, actual: hashB64 });
+        this.onError?.(new Error('Chunk integrity check failed for chunk ' + index));
+        return;
+      }
+    }
+    this.receivedChunks.set(index, chunkData);
+    this.bytesReceived += chunkData.byteLength;
+    console.log(`[FileTransferReceiver] Received chunk ${index}/${this.metadata.chunks - 1}, size: ${chunkData.byteLength}`);
+    // Log all received chunk indices and total bytes so far
+    const receivedIndices = Array.from(this.receivedChunks.keys()).sort((a, b) => a - b);
+    console.log(`[FileTransferReceiver] All received chunk indices:`, receivedIndices, `Total bytes received: ${this.bytesReceived}`);
     this.updateProgress();
   }
 
@@ -339,7 +432,7 @@ export class FileTransferReceiver {
   }
 
   private currentFileIndex = 0;
-  private handleComplete() {
+  private async handleComplete() {
     if (!this.metadata) {
       this.onError?.(new Error('No metadata received'));
       return;
@@ -350,6 +443,7 @@ export class FileTransferReceiver {
     for (let i = 0; i < this.metadata.chunks; i++) {
       const chunk = this.receivedChunks.get(i);
       if (!chunk) {
+        console.error(`[FileTransferReceiver] Missing chunk ${i} of ${this.metadata.chunks}`);
         this.onError?.(new Error(`Missing chunk ${i}`));
         return;
       }
@@ -357,7 +451,20 @@ export class FileTransferReceiver {
     }
 
     const blob = new Blob(chunks, { type: this.metadata.type });
-    console.log('✅ Transfer complete, file reconstructed');
+    // Calculate SHA-256 hash of the reconstructed file
+    const arrayBuffer = await blob.arrayBuffer();
+    // Log first 16 bytes of reconstructed file
+    const reassembledHex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const hashBuffer = await sha256(arrayBuffer);
+    const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+    console.log('✅ Transfer complete, file reconstructed:', {
+      name: this.metadata.name,
+      type: this.metadata.type,
+      size: blob.size,
+      blobType: blob.type,
+      sha256: hashB64,
+      first16: reassembledHex
+    });
     if (typeof this.onComplete === 'function') {
       this.onComplete(blob, this.currentFileIndex);
     }

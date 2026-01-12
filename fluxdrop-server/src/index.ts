@@ -110,6 +110,7 @@ async function handleMessage(ws: WebSocket, message: SignalingMessage) {
     case 'offer':
     case 'answer':
     case 'ice-candidate':
+    case 'public-key':
       await handleSignaling(ws, client, message);
       break;
     

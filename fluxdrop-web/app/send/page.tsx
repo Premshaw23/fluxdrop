@@ -8,10 +8,17 @@ import Link from 'next/link';
 import { SignalingClient } from '@/lib/signaling/SignalingClient';
 import { RTCConnection } from '@/lib/webrtc/RTCConnection';
 import { FileTransferSender, formatBytes, formatSpeed, formatTime } from '@/lib/transfer/FileTransfer';
+import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecret } from '@/lib/crypto/crypto';
 
 type Step = 'select' | 'waiting' | 'connected' | 'transferring' | 'complete';
 
 export default function SendPage() {
+    // Add state to store file debug info
+    const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
+  // ECDH state
+  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
+  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
+  const sharedSecretRef = useRef<CryptoKey | null>(null);
     // Drag & drop state
     const [isDragActive, setIsDragActive] = useState(false);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -58,7 +65,7 @@ export default function SendPage() {
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files ? Array.from(event.target.files) : [];
-    console.log('[SendPage] Files selected:', selectedFiles);
+    // ...existing code...
     handleFiles(selectedFiles);
   };
 
@@ -99,12 +106,12 @@ export default function SendPage() {
         return [];
       })).then((results) => {
         droppedFiles = results.flat();
-        console.log('[SendPage] Files dropped:', droppedFiles);
+        // ...existing code...
         handleFiles(droppedFiles);
       });
     } else {
       droppedFiles = Array.from(event.dataTransfer.files);
-      console.log('[SendPage] Files dropped:', droppedFiles);
+      // ...existing code...
       handleFiles(droppedFiles);
     }
   };
@@ -131,7 +138,7 @@ export default function SendPage() {
       // Initialize WebRTC
       const rtc = new RTCConnection({
         onStateChange: (state) => {
-          console.log('Connection state:', state);
+          // ...existing code...
           if (state === 'connected') {
             setStep('connected');
           } else if (state === 'failed') {
@@ -139,16 +146,16 @@ export default function SendPage() {
           }
         },
         onDataChannelOpen: () => {
-          console.log('Data channel ready');
+          // ...existing code...
           dataChannelReadyRef.current = true;
           // If files are already selected, start transfer now
           if (filesRef.current.length > 0) {
-            console.log('[SendPage] Files already selected when data channel opened, starting transfer');
+            // ...existing code...
             startTransfer(filesRef.current);
           }
         },
         onError: (err) => {
-          console.error('[SendPage] RTC error:', err);
+          // ...existing code...
           setError(err.message);
         }
       });
@@ -161,11 +168,29 @@ export default function SendPage() {
         setSessionCode(message.code);
       });
 
+
       signaling.on('peer-joined', async () => {
         setStep('connected');
+        // ECDH: generate key pair and send public key
+        const keyPair = await generateECDHKeyPair();
+        ecdhKeyPairRef.current = keyPair;
+        const exported = await exportPublicKey(keyPair.publicKey);
+        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+        signaling.sendPublicKey(pubKeyB64);
         // Create and send offer
         const offer = await rtc.createOffer();
         signaling.sendOffer(offer.sdp!);
+      });
+
+      signaling.on('public-key', async (message) => {
+        // Receive peer's public key, import, and derive shared secret
+        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
+        const peerKey = await importPublicKey(raw.buffer);
+        peerPublicKeyRef.current = peerKey;
+        if (ecdhKeyPairRef.current) {
+          sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
+          console.log('[SendPage] Shared secret derived');
+        }
       });
 
       signaling.on('answer', async (message) => {
@@ -177,12 +202,12 @@ export default function SendPage() {
       });
 
       signaling.on('error', (message) => {
-        console.error('[SendPage] signaling error:', message);
+        // ...existing code...
         setError(message.error);
       });
 
       signaling.on('peer-disconnected', () => {
-        console.warn('[SendPage] Peer disconnected');
+        // ...existing code...
         setError('Receiver disconnected. Please try again or resend files.');
         setStep('select');
         transferRef.current?.cancel();
@@ -204,21 +229,38 @@ export default function SendPage() {
 
   // Multi-file batch transfer using new protocol
   const startTransfer = async (selectedFiles: File[]) => {
-    console.log('[SendPage] startTransfer called. files:', selectedFiles);
+    // ...existing code...
     if (!selectedFiles.length || !rtcRef.current) {
-      console.warn('[SendPage] startTransfer: files or rtcRef missing');
+      // ...existing code...
       return;
     }
 
+    if (!sharedSecretRef.current) {
+      setError('Encryption handshake not complete. Please wait for the connection to establish before sending files.');
+      // ...existing code...
+      return;
+    }
+    // Calculate debug info for each file before transfer
+    Promise.all(selectedFiles.map(async (file) => {
+      const arrayBuffer = await file.arrayBuffer();
+      const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+      const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+      const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      return {
+        hash: hashB64,
+        type: file.type,
+        size: file.size,
+        hex
+      };
+    })).then(setFileDebugInfo);
     setStep('transferring');
-
     const transfer = new FileTransferSender(
       (data) => rtcRef.current!.send(data),
       () => rtcRef.current!.getBufferedAmount(),
       () => rtcRef.current!.getDataChannelState()
     );
+    transfer.setEncryptionKey(sharedSecretRef.current);
     transferRef.current = transfer;
-
     transfer.onProgress = (prog) => {
       const fileIdx = transfer.fileIndex;
       setProgressList((prev) => {
@@ -237,17 +279,22 @@ export default function SendPage() {
         return updated;
       });
     };
-
     transfer.onComplete = () => {
       setProgressList((prev) => prev.map(() => 100));
       setStep('complete');
+      // Clear keys after transfer
+      ecdhKeyPairRef.current = null;
+      peerPublicKeyRef.current = null;
+      sharedSecretRef.current = null;
     };
-
     transfer.onError = (err) => {
-      console.error('[SendPage] transfer error:', err);
+      // ...existing code...
       setError(err.message);
+      // Clear keys on error
+      ecdhKeyPairRef.current = null;
+      peerPublicKeyRef.current = null;
+      sharedSecretRef.current = null;
     };
-
     await transfer.startBatchTransfer(selectedFiles);
   };
 
@@ -258,7 +305,7 @@ export default function SendPage() {
   };
 
   const reset = () => {
-    console.log('[SendPage] reset called');
+    // ...existing code...
     transferRef.current?.cancel();
     rtcRef.current?.close();
     signalingRef.current?.disconnect();
@@ -281,6 +328,7 @@ export default function SendPage() {
 
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
+      {/* Debug UI removed */}
       {/* Mobile viewport meta tag for App Router (if not already in _app or layout) */}
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
