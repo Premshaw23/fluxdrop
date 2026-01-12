@@ -25,6 +25,8 @@ export default function SendPage() {
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferSender | null>(null);
+  const dataChannelReadyRef = useRef(false);
+  const fileRef = useRef<File | null>(null);
 
   useEffect(() => {
     return () => {
@@ -37,11 +39,21 @@ export default function SendPage() {
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
+    console.log('[SendPage] File selected:', selectedFile);
     if (!selectedFile) return;
 
     setFile(selectedFile);
+    fileRef.current = selectedFile;
     setStep('waiting');
     initializeConnection();
+
+    // If data channel is already ready, start transfer now
+    setTimeout(() => {
+      if (dataChannelReadyRef.current && fileRef.current) {
+        console.log('[SendPage] Data channel ready after file select, starting transfer');
+        startTransfer(fileRef.current);
+      }
+    }, 0);
   };
 
   const initializeConnection = async () => {
@@ -65,7 +77,12 @@ export default function SendPage() {
         },
         onDataChannelOpen: () => {
           console.log('Data channel ready');
-          startTransfer();
+          dataChannelReadyRef.current = true;
+          // If file is already selected, start transfer now
+          if (fileRef.current) {
+            console.log('[SendPage] File already selected when data channel opened, starting transfer');
+            startTransfer(fileRef.current);
+          }
         },
         onError: (err) => {
           setError(err.message);
@@ -111,8 +128,12 @@ export default function SendPage() {
     }
   };
 
-  const startTransfer = async () => {
-    if (!file || !rtcRef.current) return;
+  const startTransfer = async (selectedFile: File) => {
+    console.log('[SendPage] startTransfer called. file:', selectedFile);
+    if (!selectedFile || !rtcRef.current) {
+      console.warn('[SendPage] startTransfer: file or rtcRef missing');
+      return;
+    }
 
     setStep('transferring');
 
@@ -137,7 +158,7 @@ export default function SendPage() {
       setError(err.message);
     };
 
-    await transfer.startTransfer(file);
+    await transfer.startTransfer(selectedFile);
   };
 
   const copyCode = () => {
@@ -159,7 +180,7 @@ export default function SendPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">

@@ -107,8 +107,11 @@ export class RTCConnection {
     };
 
     this.dataChannel.onmessage = (event) => {
+      console.log('[RTCConnection] Data channel received message, bytes:', event.data?.byteLength);
       if (event.data instanceof ArrayBuffer) {
         this.config.onMessage?.(event.data);
+      } else {
+        console.warn('[RTCConnection] Received non-ArrayBuffer message:', event.data);
       }
     };
 
@@ -163,11 +166,27 @@ export class RTCConnection {
     }
 
     try {
-      this.dataChannel.send(data);
+      // RTCDataChannel.send accepts ArrayBuffer, string, or Blob
+      if (data instanceof ArrayBuffer) {
+        this.dataChannel.send(data);
+        console.log('[RTCConnection] Sent ArrayBuffer, bytes:', data.byteLength);
+      } else if (data instanceof Uint8Array) {
+        // Copy only the relevant bytes into a new ArrayBuffer
+        const arr = new Uint8Array(data.byteLength);
+        arr.set(data);
+        this.dataChannel.send(arr.buffer);
+        console.log('[RTCConnection] Sent Uint8Array, bytes:', arr.byteLength);
+      } else {
+        const err = new Error('Unsupported data type for send');
+        console.error('❌ Send failed:', err);
+        this.config.onError?.(err);
+        return false;
+      }
       return true;
     } catch (error) {
-      console.error('❌ Send failed:', error);
-      this.config.onError?.(error instanceof Error ? error : new Error('Send failed'));
+      const errObj = error instanceof Error ? error : new Error('Send failed');
+      console.error('❌ Send failed:', errObj);
+      this.config.onError?.(errObj);
       return false;
     }
   }

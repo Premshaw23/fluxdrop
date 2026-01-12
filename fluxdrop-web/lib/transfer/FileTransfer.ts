@@ -159,13 +159,15 @@ export class FileTransferSender {
       combined.set(new Uint8Array(headerLength.buffer), 0);
       combined.set(header, 4);
       combined.set(new Uint8Array(message.data), 4 + header.length);
-      this.sendData(combined);
+      const result = this.sendData(combined);
+      console.log(`[FileTransferSender] Sent chunk ${message.chunkIndex}, type=${message.type}, bytes=${combined.length}, sendData returned:`, result);
     } else {
       // Send: [header length (4 bytes)][header]
       const combined = new Uint8Array(4 + header.length);
       combined.set(new Uint8Array(headerLength.buffer), 0);
       combined.set(header, 4);
-      this.sendData(combined);
+      const result = this.sendData(combined);
+      console.log(`[FileTransferSender] Sent message type=${message.type}, bytes=${combined.length}, sendData returned:`, result);
     }
   }
 
@@ -186,7 +188,9 @@ export class FileTransferReceiver {
   public onError?: (error: Error) => void;
 
   handleMessage(data: ArrayBuffer) {
+    console.log('[FileTransferReceiver] Received message, bytes:', data.byteLength);
     const message = this.parseMessage(data);
+    console.log('[FileTransferReceiver] Parsed message:', message);
 
     switch (message.type) {
       case 'metadata':
@@ -198,6 +202,8 @@ export class FileTransferReceiver {
       case 'complete':
         this.handleComplete();
         break;
+      default:
+        console.warn('[FileTransferReceiver] Unknown message type:', message.type);
     }
   }
 

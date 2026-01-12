@@ -100,6 +100,7 @@ export default function ReceivePage() {
         console.log('Joined session');
       });
 
+      // Move offer/ice-candidate handlers here, after RTC is initialized
       signaling.on('offer', async (message) => {
         await rtc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
         const answer = await rtc.createAnswer();
@@ -155,7 +156,7 @@ export default function ReceivePage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
