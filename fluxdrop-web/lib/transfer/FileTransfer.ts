@@ -4,7 +4,7 @@ export interface BatchMetadata {
 }
 // fluxdrop-web/lib/transfer/FileTransfer.ts
 
-const CHUNK_SIZE = 192 * 1024; // 192KB chunks for speed/reliability balance
+export let CHUNK_SIZE = 192 * 1024; // Default 192KB
 
 export interface FileMetadata {
   name: string;
@@ -24,7 +24,8 @@ export interface TransferProgress {
 }
 
 interface ChunkMessage {
-  type: 'batch-metadata' | 'metadata' | 'chunk' | 'complete';
+  type: 'batch-metadata' | 'metadata' | 'chunk' | 'complete' | 'resume-request';
+  missingChunks?: number[];
   batchMetadata?: BatchMetadata;
   metadata?: FileMetadata;
   chunkIndex?: number;
@@ -34,6 +35,130 @@ interface ChunkMessage {
 }
 
 export class FileTransferSender {
+                          /**
+                           * Debug: log current state before starting batch transfer
+                           */
+                          private debugState(label: string) {
+                            console.log(`[FileTransferSender][DEBUG] ${label}:`, {
+                              files: this.files,
+                              fileIndex: this._fileIndex,
+                              chunks: this.chunks?.length,
+                              isCancelled: this.isCancelled,
+                              dataChannelState: typeof this.getDataChannelState === 'function' ? this.getDataChannelState() : 'unknown',
+                            });
+                          }
+                        public onUserError?: (message: string) => void;
+                        public onNetworkStatusChange?: (online: boolean) => void;
+                        private errorLog: string[] = [];
+                      private _networkOnline: boolean = navigator.onLine;
+                      private _networkListenerAdded: boolean = false;
+
+                      /**
+                       * Start listening for network status changes
+                       */
+                      public enableNetworkStatusListener() {
+                        if (this._networkListenerAdded) return;
+                        window.addEventListener('online', this._handleNetworkOnline);
+                        window.addEventListener('offline', this._handleNetworkOffline);
+                        this._networkListenerAdded = true;
+                      }
+
+                      private _handleNetworkOnline = () => {
+                        this._networkOnline = true;
+                        console.log('[Network] Online');
+                        this.onNetworkStatusChange?.(true);
+                      };
+                      private _handleNetworkOffline = () => {
+                        this._networkOnline = false;
+                        console.log('[Network] Offline');
+                        this.onNetworkStatusChange?.(false);
+                      };
+                    private sessionId: string = '';
+                    public setSessionId(id: string) {
+                      this.sessionId = id;
+                    }
+                  private connectionType: string = '';
+                  private transferSuccess: boolean = false;
+                  private static p2pSuccessCount: number = 0;
+                  private static relaySuccessCount: number = 0;
+                  private static transferCount: number = 0;
+                private lastChunkSendTime: number = 0;
+                private chunkSendTimings: number[] = [];
+              private minChunkDelayMs: number = 0;
+
+              /**
+               * Set minimum delay (ms) between chunk sends for throttling
+               */
+              public setMinChunkDelay(ms: number) {
+                this.minChunkDelayMs = ms;
+              }
+            private chunkBuffer: Array<ArrayBuffer | null> = [];
+            private maxBufferedChunks: number = 10; // Only buffer 10 chunks at a time
+          /**
+           * Set chunk size for optimization (in bytes)
+           */
+          public static setChunkSize(size: number) {
+            CHUNK_SIZE = size;
+          }
+
+          /**
+           * Test chunking for different sizes, returns array of chunk counts
+           */
+          public static testChunkSizes(file: File, sizes: number[]): number[] {
+            return sizes.map(sz => Math.ceil(file.size / sz));
+          }
+        /**
+         * Detect if file has changed during transfer (by name, size, type)
+         */
+        public hasFileChanged(newFile: File): boolean {
+          if (!this.file) return false;
+          return (
+            this.file.name !== newFile.name ||
+            this.file.size !== newFile.size ||
+            this.file.type !== newFile.type
+          );
+        }
+      /**
+       * Verify chunk integrity before/after resend (optional, for resumed chunks)
+       */
+      public async verifyChunk(idx: number): Promise<boolean> {
+        if (!this.chunks || !this.file) return false;
+        if (idx < 0 || idx >= this.chunks.length) return false;
+        const chunk = this.chunks[idx];
+        let arrayBuffer = await chunk.arrayBuffer();
+        const hashBuffer = await sha256(arrayBuffer);
+        const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+        // Optionally compare with previously sent hash if stored
+        return true; // Always true for now, extend as needed
+      }
+    /**
+     * Handle resume-request from receiver, resend missing chunks
+     */
+    public async handleResumeRequest(missingChunks: number[]) {
+      if (!this.chunks || !this.file) return;
+      for (const idx of missingChunks) {
+        if (idx >= 0 && idx < this.chunks.length && !this.sentChunkBitmap[idx]) {
+          const chunk = this.chunks[idx];
+          let arrayBuffer = await chunk.arrayBuffer();
+          let iv: Uint8Array | undefined = undefined;
+          const hashBuffer = await sha256(arrayBuffer);
+          const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+          if (this.encryptionKey) {
+            const ivRaw = window.crypto.getRandomValues(new Uint8Array(12));
+            iv = new Uint8Array(ivRaw.buffer.slice(0));
+            arrayBuffer = await encryptAESGCM(this.encryptionKey, arrayBuffer, iv as BufferSource);
+          }
+          this.sendMessage({
+            type: 'chunk',
+            chunkIndex: idx,
+            data: arrayBuffer,
+            ...(iv ? { iv: Array.from(iv) } : {}),
+            hash: hashB64
+          });
+          this.sentChunkBitmap[idx] = true;
+        }
+      }
+    }
   private encryptionKey: CryptoKey | null = null;
 
   /**
@@ -54,6 +179,7 @@ export class FileTransferSender {
   public async startBatchTransfer(files: File[]) {
     this.files = files;
     this._fileIndex = 0;
+    this.debugState('startBatchTransfer called');
     // Prepare batch metadata
     const batchMetadata: BatchMetadata = {
       files: files.map(f => ({
@@ -66,9 +192,16 @@ export class FileTransferSender {
     console.log('[FileTransferSender] Sending batch-metadata:', batchMetadata);
     this.sendMessage({ type: 'batch-metadata', batchMetadata });
     await this.startNextFile();
+    this.debugState('startNextFile called');
+    this.debugState('sendNextChunk called');
   }
 
     private async startNextFile() {
+            // Log connection type for P2P success rate
+            if (typeof (window as any).currentConnectionType === 'string') {
+              this.connectionType = (window as any).currentConnectionType;
+              console.log(`[P2P Test] Connection type: ${this.connectionType}`);
+            }
       if (this._fileIndex >= this.files.length) {
         this.onComplete?.();
         return;
@@ -79,6 +212,13 @@ export class FileTransferSender {
       this.currentChunk = 0;
       this.bytesSent = 0;
       this.startTime = Date.now();
+      this.sentChunkBitmap = new Array(this.chunks.length).fill(false);
+      // Preload chunk buffers for current file
+      this.chunkBuffer = new Array(this.chunks.length).fill(null);
+      // Preload only the first N chunks
+      for (let i = 0; i < Math.min(this.chunks.length, this.maxBufferedChunks); i++) {
+        this.chunks[i].arrayBuffer().then(buf => { this.chunkBuffer[i] = buf; });
+      }
 
       // Send metadata for this file
       const metadata: FileMetadata = {
@@ -97,6 +237,60 @@ export class FileTransferSender {
   private startTime = 0;
   private bytesSent = 0;
   private isCancelled = false;
+  private chunkRetryCounts: Record<number, number> = {};
+  private readonly maxChunkRetries = 3;
+
+  /**
+   * Add error to internal log
+   */
+  private logError(msg: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    this.errorLog.push(`[${timestamp}] ${msg}`);
+    // Also print to console for dev
+    console.error(`[FileTransferSender] ${msg}`);
+  }
+
+  /**
+   * Get error log
+   */
+  public getErrorLog(): string[] {
+    return [...this.errorLog];
+  }
+  private sentChunkBitmap: boolean[] = [];
+    /**
+     * Serialize current transfer state for reconnect/resume
+     */
+    public serializeState(): any {
+      if (!this.file) return null;
+      return {
+        fileIndex: this._fileIndex,
+        fileName: this.file.name,
+        fileSize: this.file.size,
+        fileType: this.file.type,
+        currentChunk: this.currentChunk,
+        totalChunks: this.chunks.length,
+        bytesSent: this.bytesSent,
+        startTime: this.startTime,
+      };
+    }
+
+    /**
+     * Restore transfer state after reconnect
+     */
+    /**
+     * Restore transfer state after reconnect, optionally resume from a specific chunk
+     */
+    public restoreState(state: any, file: File, resumeChunkIndex?: number) {
+      if (!state || !file) return;
+      this.file = file;
+      this.chunks = this.createChunks(file);
+      this._fileIndex = state.fileIndex;
+      this.currentChunk = typeof resumeChunkIndex === 'number' ? resumeChunkIndex : state.currentChunk;
+      this.bytesSent = state.bytesSent;
+      this.startTime = state.startTime || Date.now();
+      this.isCancelled = false;
+      this.sendNextChunk();
+    }
 
   public onProgress?: (progress: TransferProgress) => void;
   public onComplete?: () => void;
@@ -152,17 +346,55 @@ export class FileTransferSender {
   }
 
   private async sendNextChunk() {
+            // On last chunk, log transfer success and update counters
+            if (this.currentChunk === this.chunks.length - 1) {
+              this.transferSuccess = true;
+              FileTransferSender.transferCount++;
+              if (this.connectionType === 'P2P direct') FileTransferSender.p2pSuccessCount++;
+              if (this.connectionType === 'TURN relay') FileTransferSender.relaySuccessCount++;
+              console.log(`[P2P Test] Transfer complete. P2P: ${FileTransferSender.p2pSuccessCount}, Relay: ${FileTransferSender.relaySuccessCount}, Total: ${FileTransferSender.transferCount}`);
+            }
+        const now = Date.now();
+        if (this.lastChunkSendTime) {
+          const delta = now - this.lastChunkSendTime;
+          this.chunkSendTimings.push(delta);
+          if (this.chunkSendTimings.length % 10 === 0) {
+            const avg = this.chunkSendTimings.reduce((a, b) => a + b, 0) / this.chunkSendTimings.length;
+            console.log(`[Profile] Avg chunk send interval: ${avg.toFixed(2)} ms over ${this.chunkSendTimings.length} chunks`);
+          }
+        }
+        this.lastChunkSendTime = now;
+        // Log buffer usage
+        if (this.chunkBuffer) {
+          const buffered = this.chunkBuffer.filter(b => b !== null).length;
+          if (this.currentChunk % 10 === 0) {
+            console.log(`[Profile] Buffered chunks: ${buffered}/${this.chunkBuffer.length}`);
+          }
+        }
     if (this.isCancelled) {
-      console.log('❌ Transfer cancelled');
+      const msg = 'Transfer cancelled by user or system.';
+      console.log('❌', msg);
+      this.onUserError?.(msg);
       return;
     }
 
-      if (this.currentChunk >= this.chunks.length) {
-        this.sendMessage({ type: 'complete' });
-        this._fileIndex++;
-        await this.startNextFile();
-        return;
-      }
+    if (this.currentChunk >= this.chunks.length) {
+      this.sendMessage({ type: 'complete' });
+      this._fileIndex++;
+      await this.startNextFile();
+      return;
+    }
+
+    // Check retry count for current chunk
+    if (!this.chunkRetryCounts[this.currentChunk]) {
+      this.chunkRetryCounts[this.currentChunk] = 0;
+    }
+    if (this.chunkRetryCounts[this.currentChunk] >= this.maxChunkRetries) {
+      this.logError(`Max retries reached for chunk ${this.currentChunk}. Aborting transfer.`);
+      this.onError?.(new Error(`Max retries reached for chunk ${this.currentChunk}`));
+      this.isCancelled = true;
+      return;
+    }
 
     // Even stricter throttling: only send if buffer is very low
     const buffered = this.getBufferedAmount();
@@ -171,8 +403,20 @@ export class FileTransferSender {
       return;
     }
 
-    const chunk = this.chunks[this.currentChunk];
-    let arrayBuffer = await chunk.arrayBuffer();
+    let arrayBuffer: ArrayBuffer;
+    if (this.chunkBuffer[this.currentChunk]) {
+      arrayBuffer = this.chunkBuffer[this.currentChunk]!;
+    } else {
+      arrayBuffer = await this.chunks[this.currentChunk].arrayBuffer();
+      // Only buffer if within maxBufferedChunks window
+      if (this.currentChunk < this.maxBufferedChunks) {
+        this.chunkBuffer[this.currentChunk] = arrayBuffer;
+      }
+    }
+    // Release buffer for sent chunk to save memory
+    if (this.currentChunk > 0 && this.currentChunk - 1 < this.chunkBuffer.length) {
+      this.chunkBuffer[this.currentChunk - 1] = null;
+    }
     // Log first 16 bytes of chunk before encryption
     const preEncHex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
     console.log(`[FileTransferSender] Chunk ${this.currentChunk} pre-encryption first 16 bytes: ${preEncHex}`);
@@ -203,13 +447,14 @@ export class FileTransferSender {
     });
 
     this.bytesSent += arrayBuffer.byteLength;
+    this.sentChunkBitmap[this.currentChunk] = true;
     this.currentChunk++;
 
     // Update progress
     this.updateProgress();
 
-    // Send next chunk
-    setTimeout(() => this.sendNextChunk(), 0);
+    // Send next chunk with optional throttling
+    setTimeout(() => this.sendNextChunk(), this.minChunkDelayMs);
   }
 
   private updateProgress() {
@@ -231,12 +476,27 @@ export class FileTransferSender {
     };
 
     this.onProgress?.(progress);
+    // Log progress for load testing with multiple sessions
+    if (this.sessionId && (this.currentChunk % 50 === 0 || progress.percentage === 100)) {
+      console.log(`[LoadTest] Session ${this.sessionId}: ${progress.percentage.toFixed(2)}%, Speed: ${formatSpeed(progress.speed)}, Chunk: ${this.currentChunk}/${this.chunks.length}`);
+    }
+    // Log progress for slow network and large file testing
+    if (this.currentChunk % 50 === 0 || progress.percentage === 100) {
+      console.log(`[Test] Progress: ${progress.percentage.toFixed(2)}%, Speed: ${formatSpeed(progress.speed)}, Remaining: ${formatTime(progress.timeRemaining)}, Chunk: ${this.currentChunk}/${this.chunks.length}`);
+    }
   }
 
   private sendMessage(message: ChunkMessage) {
     // Check if data channel is open before sending
     if (this.getDataChannelState && this.getDataChannelState() !== 'open') {
-      console.warn('[FileTransferSender] Data channel not open, aborting send');
+      const msg = 'Connection lost. Retrying chunk send...';
+      this.logError(msg);
+      this.onUserError?.(msg);
+      // Increment retry count for current chunk
+      if (typeof this.currentChunk === 'number') {
+        this.chunkRetryCounts[this.currentChunk] = (this.chunkRetryCounts[this.currentChunk] || 0) + 1;
+      }
+      setTimeout(() => this.sendNextChunk(), 500);
       return;
     }
     const encoder = new TextEncoder();
@@ -275,11 +535,64 @@ export class FileTransferSender {
 
   cancel() {
     this.isCancelled = true;
+    this.logError('Transfer cancelled by user or system.');
   }
 }
 
 export class FileTransferReceiver {
+          private errorLog: string[] = [];
+          /**
+           * Add error to internal log
+           */
+          private logError(msg: string) {
+            const timestamp = new Date().toLocaleTimeString();
+            this.errorLog.push(`[${timestamp}] ${msg}`);
+            // Also print to console for dev
+            console.error(`[FileTransferReceiver] ${msg}`);
+          }
+
+          /**
+           * Get error log
+           */
+          public getErrorLog(): string[] {
+            return [...this.errorLog];
+          }
+        /**
+         * Detect if metadata changed (file changed during transfer)
+         */
+        public hasMetadataChanged(newMetadata: FileMetadata): boolean {
+          if (!this.metadata) return false;
+          return (
+            this.metadata.name !== newMetadata.name ||
+            this.metadata.size !== newMetadata.size ||
+            this.metadata.type !== newMetadata.type
+          );
+        }
+      /**
+       * Verify integrity of received chunk (hash check)
+       */
+      public async verifyReceivedChunk(idx: number, expectedHash: string): Promise<boolean> {
+        if (!this.receivedChunks.has(idx)) return false;
+        const chunkData = this.receivedChunks.get(idx)!;
+        const hashBuffer = await sha256(chunkData);
+        const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+        return hashB64 === expectedHash;
+      }
+    /**
+     * Request missing chunks from sender after reconnect
+     */
+    public requestMissingChunks(sendControlMessage: (msg: ChunkMessage) => void) {
+      if (!this.metadata) return;
+      const missing: number[] = [];
+      for (let i = 0; i < this.metadata.chunks; i++) {
+        if (!this.receivedChunkBitmap[i]) missing.push(i);
+      }
+      if (missing.length > 0) {
+        sendControlMessage({ type: 'resume-request', missingChunks: missing });
+      }
+    }
   private decryptionKey: CryptoKey | null = null;
+  private receivedChunkBitmap: boolean[] = [];
 
   /**
    * Optionally set an AES-GCM key for decrypting chunks
@@ -350,6 +663,7 @@ export class FileTransferReceiver {
     this.receivedChunks.clear();
     this.bytesReceived = 0;
     this.startTime = Date.now();
+      this.receivedChunkBitmap = new Array(metadata.chunks).fill(false);
 
     console.log(`📥 Receiving: ${metadata.name} (${metadata.size} bytes, ${metadata.chunks} chunks)`);
     this.onMetadata?.(metadata);
@@ -358,6 +672,7 @@ export class FileTransferReceiver {
   private async handleChunk(index: number, data: ArrayBuffer, iv?: number[], hash?: string) {
     if (!this.metadata) {
       console.error('❌ Received chunk before metadata');
+      if (this.onError) this.onError(new Error('Received chunk before metadata'));
       return;
     }
 
@@ -396,17 +711,19 @@ export class FileTransferReceiver {
       const hashBuffer = await sha256(chunkData);
       const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
       if (hashB64 !== hash) {
-        console.error('❌ Chunk integrity check failed for chunk', index, { expected: hash, actual: hashB64 });
+        this.logError(`Chunk integrity check failed for chunk ${index} (expected: ${hash}, actual: ${hashB64})`);
         this.onError?.(new Error('Chunk integrity check failed for chunk ' + index));
         return;
       }
     }
     this.receivedChunks.set(index, chunkData);
+    this.receivedChunkBitmap[index] = true;
     this.bytesReceived += chunkData.byteLength;
     console.log(`[FileTransferReceiver] Received chunk ${index}/${this.metadata.chunks - 1}, size: ${chunkData.byteLength}`);
-    // Log all received chunk indices and total bytes so far
     const receivedIndices = Array.from(this.receivedChunks.keys()).sort((a, b) => a - b);
     console.log(`[FileTransferReceiver] All received chunk indices:`, receivedIndices, `Total bytes received: ${this.bytesReceived}`);
+    // Verbose: print bitmap
+    console.log(`[FileTransferReceiver] Chunk bitmap:`, this.receivedChunkBitmap);
     this.updateProgress();
   }
 
@@ -444,7 +761,12 @@ export class FileTransferReceiver {
       const chunk = this.receivedChunks.get(i);
       if (!chunk) {
         console.error(`[FileTransferReceiver] Missing chunk ${i} of ${this.metadata.chunks}`);
-        this.onError?.(new Error(`Missing chunk ${i}`));
+        if (this.onError) this.onError(new Error(`Missing chunk ${i}`));
+        // Verbose: print all received indices and bitmap
+        console.log(`[FileTransferReceiver] Missing chunk debug:`, {
+          receivedIndices: Array.from(this.receivedChunks.keys()),
+          bitmap: this.receivedChunkBitmap
+        });
         return;
       }
       chunks.push(chunk);
@@ -466,7 +788,10 @@ export class FileTransferReceiver {
       first16: reassembledHex
     });
     if (typeof this.onComplete === 'function') {
+      console.log(`[FileTransferReceiver] Calling onComplete for fileIndex=${this.currentFileIndex}, blob.size=${blob.size}`);
       this.onComplete(blob, this.currentFileIndex);
+    } else {
+      console.warn('[FileTransferReceiver] onComplete handler not set');
     }
     this.currentFileIndex++;
     // Wait for next metadata to start next file

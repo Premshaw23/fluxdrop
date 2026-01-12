@@ -73,6 +73,7 @@ export default function ReceivePage() {
           console.log('Data channel ready');
         },
         onMessage: (data) => {
+          console.log('[ReceivePage][DEBUG] RTCConnection onMessage called, bytes:', data.byteLength);
           transferRef.current?.handleMessage(data);
         },
         onError: (err) => {
@@ -149,6 +150,7 @@ export default function ReceivePage() {
           });
         };
         transfer.onComplete = async (file: Blob, completedFileIndex: number) => {
+          console.log(`[ReceivePage] onComplete called for fileIndex=${completedFileIndex}, blob.size=${file.size}`);
           // Calculate SHA-256 and hex preview
           const arrayBuffer = await file.arrayBuffer();
           const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
@@ -178,6 +180,7 @@ export default function ReceivePage() {
             console.log('[ReceivePage] setReceivedFiles:', updated);
             const totalFiles = batchMetadata.length || 1;
             const receivedCount = updated.filter(Boolean).length;
+            console.log(`[ReceivePage] ReceivedCount=${receivedCount}, totalFiles=${totalFiles}`);
             if (receivedCount >= totalFiles) {
               console.log('[ReceivePage] All files received, setting step to complete');
               setStep('complete');

@@ -24,13 +24,39 @@ export class RTCConnection {
     this.config = config;
   }
 
+  
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 3;
+  private reconnectDelay = 2000;
+
   async initialize(role: 'sender' | 'receiver') {
+    const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME || '';
+    const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL || '';
     const configuration: RTCConfiguration = {
       iceServers: [
         {
-          urls: process.env.NEXT_PUBLIC_STUN_SERVER || 'stun:stun.l.google.com:19302'
-        }
-        // TURN servers will be added in Week 4
+          urls: 'stun:stun.relay.metered.ca:80',
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:80',
+          username: turnUsername,
+          credential: turnCredential,
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+          username: turnUsername,
+          credential: turnCredential,
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:443',
+          username: turnUsername,
+          credential: turnCredential,
+        },
+        {
+          urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+          username: turnUsername,
+          credential: turnCredential,
+        },
       ]
     };
 
@@ -43,40 +69,79 @@ export class RTCConnection {
       }
     };
 
-    // Handle connection state changes
-    this.peerConnection.onconnectionstatechange = () => {
-      const state = this.peerConnection?.connectionState;
-      console.log('📡 Connection state:', state);
-      
-      if (state) {
-        this.config.onStateChange?.(state as ConnectionState);
-      }
-
-      if (state === 'failed' || state === 'closed') {
-        this.config.onError?.(new Error(`Connection ${state}`));
-      }
-    };
-
-    // Handle ICE connection state
+    // Log connection type and quality
     this.peerConnection.oniceconnectionstatechange = () => {
-      console.log('🧊 ICE state:', this.peerConnection?.iceConnectionState);
+      const iceState = this.peerConnection?.iceConnectionState;
+      console.log('🧊 ICE state:', iceState);
+
+      // Check for relay (TURN) or direct (P2P)
+      const stats = this.peerConnection?.getStats ? this.peerConnection.getStats() : null;
+      if (stats) {
+        stats.then((report) => {
+          report.forEach((stat) => {
+            if (stat.type === 'candidate-pair' && stat.state === 'connected') {
+              const local = report.get(stat.localCandidateId);
+              const remote = report.get(stat.remoteCandidateId);
+              if (local && remote) {
+                const isRelay = local.candidateType === 'relay' || remote.candidateType === 'relay';
+                console.log('🔎 Connection type:', isRelay ? 'TURN relay' : 'P2P direct');
+                // Basic quality indicator
+                if (typeof stat.currentRoundTripTime === 'number') {
+                  const rtt = stat.currentRoundTripTime;
+                  let quality = 'good';
+                  if (rtt > 0.5) quality = 'poor';
+                  else if (rtt > 0.2) quality = 'fair';
+                  console.log('📈 Connection quality:', quality, `(RTT: ${rtt}s)`);
+                }
+              }
+            }
+          });
+        });
+      }
+
+      // Detect connection drops and auto-reconnect
+      if (iceState === 'disconnected' || iceState === 'failed') {
+        console.warn('⚠️ Connection dropped. Attempting auto-reconnect...');
+        this.attemptReconnect(role);
+      }
     };
 
-    if (role === 'sender') {
-      await this.createDataChannel();
-    } else {
+    // Ensure receiver attaches data channel listener
+    if (role === 'receiver') {
       this.setupDataChannelListener();
     }
   }
+  private async attemptReconnect(role: 'sender' | 'receiver') {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('❌ Max reconnect attempts reached. Giving up.');
+      this.config.onError?.(new Error('Max reconnect attempts reached'));
+      return;
+    }
+    this.reconnectAttempts++;
+    console.log(`🔄 Reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
+    // Close and re-initialize connection
+    this.close();
+    setTimeout(() => {
+      this.initialize(role);
+    }, this.reconnectDelay * this.reconnectAttempts);
+  }
 
-  private async createDataChannel() {
+    // ...existing code...
+  // No stray closing brace here
+
+  public async createDataChannel() {
     if (!this.peerConnection) throw new Error('Peer connection not initialized');
 
+    console.log('[RTCConnection][DEBUG] Creating data channel (sender)...');
     this.dataChannel = this.peerConnection.createDataChannel('fileTransfer', {
       ordered: true,
       maxRetransmits: 3
     });
-
+    if (this.dataChannel) {
+      console.log('[RTCConnection][DEBUG] Data channel object:', this.dataChannel);
+    } else {
+      console.error('[RTCConnection][DEBUG] Data channel creation failed!');
+    }
     this.setupDataChannelHandlers();
     console.log('📤 Data channel created (sender)');
   }
@@ -92,21 +157,28 @@ export class RTCConnection {
   }
 
   private setupDataChannelHandlers() {
-    if (!this.dataChannel) return;
+    if (!this.dataChannel) {
+      console.error('[RTCConnection][DEBUG] setupDataChannelHandlers: dataChannel is null');
+      return;
+    }
 
     this.dataChannel.binaryType = 'arraybuffer';
+    console.log('[RTCConnection][DEBUG] setupDataChannelHandlers: Handlers attached');
 
     this.dataChannel.onopen = () => {
+      console.log('[RTCConnection][DEBUG] Data channel onopen event');
       console.log('✅ Data channel opened');
       this.config.onDataChannelOpen?.();
     };
 
     this.dataChannel.onclose = () => {
+      console.log('[RTCConnection][DEBUG] Data channel onclose event');
       console.log('👋 Data channel closed');
       this.config.onDataChannelClose?.();
     };
 
     this.dataChannel.onmessage = (event) => {
+      console.log('[RTCConnection][DEBUG] Data channel onmessage event');
       console.log('[RTCConnection] Data channel received message, bytes:', event.data?.byteLength);
       if (event.data instanceof ArrayBuffer) {
         this.config.onMessage?.(event.data);
@@ -116,6 +188,7 @@ export class RTCConnection {
     };
 
     this.dataChannel.onerror = (error) => {
+      console.log('[RTCConnection][DEBUG] Data channel onerror event');
       console.error('❌ Data channel error:', error);
       this.config.onError?.(new Error('Data channel error'));
     };
@@ -218,4 +291,8 @@ export class RTCConnection {
       this.peerConnection = null;
     }
   }
+    // Example integration for transfer state preservation
+    // Usage: Call these methods on reconnect to save/restore transfer progress
+    // sender.serializeState() to get current state
+    // sender.restoreState(state, file) to resume after reconnect
 }

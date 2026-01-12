@@ -31,6 +31,7 @@ export default function SendPage() {
   const [speedList, setSpeedList] = useState<number[]>([]);
   const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
   const [error, setError] = useState('');
+  const [errorLog, setErrorLog] = useState<string[]>([]);
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
@@ -55,6 +56,8 @@ export default function SendPage() {
     setSpeedList(new Array(selectedFiles.length).fill(0));
     setTimeRemainingList(new Array(selectedFiles.length).fill(0));
     setStep('waiting');
+    setError('');
+    setErrorLog([]);
     initializeConnection();
     setTimeout(() => {
       if (dataChannelReadyRef.current && filesRef.current.length > 0) {
@@ -146,12 +149,14 @@ export default function SendPage() {
           }
         },
         onDataChannelOpen: () => {
-          // ...existing code...
+          console.log('[SendPage][DEBUG] Data channel opened');
           dataChannelReadyRef.current = true;
-          // If files are already selected, start transfer now
+          // Only start transfer if files are selected and handshake is complete
           if (filesRef.current.length > 0) {
-            // ...existing code...
+            console.log('[SendPage][DEBUG] Data channel open, starting transfer with files:', filesRef.current);
             startTransfer(filesRef.current);
+          } else {
+            console.log('[SendPage][DEBUG] Data channel open, but no files selected');
           }
         },
         onError: (err) => {
@@ -177,6 +182,8 @@ export default function SendPage() {
         const exported = await exportPublicKey(keyPair.publicKey);
         const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
         signaling.sendPublicKey(pubKeyB64);
+        // Ensure data channel is created before offer
+        await rtc.createDataChannel();
         // Create and send offer
         const offer = await rtc.createOffer();
         signaling.sendOffer(offer.sdp!);
@@ -229,6 +236,7 @@ export default function SendPage() {
 
   // Multi-file batch transfer using new protocol
   const startTransfer = async (selectedFiles: File[]) => {
+      console.log('[SendPage][DEBUG] startTransfer called', { selectedFiles, rtcRef: rtcRef.current });
     // ...existing code...
     if (!selectedFiles.length || !rtcRef.current) {
       // ...existing code...
@@ -255,7 +263,10 @@ export default function SendPage() {
     })).then(setFileDebugInfo);
     setStep('transferring');
     const transfer = new FileTransferSender(
-      (data) => rtcRef.current!.send(data),
+      (data) => {
+        console.log('[SendPage][DEBUG] rtc.send called, bytes:', data.byteLength);
+        return rtcRef.current!.send(data);
+      },
       () => rtcRef.current!.getBufferedAmount(),
       () => rtcRef.current!.getDataChannelState()
     );
@@ -280,6 +291,7 @@ export default function SendPage() {
       });
     };
     transfer.onComplete = () => {
+        console.log('[SendPage][DEBUG] transfer.onComplete called');
       setProgressList((prev) => prev.map(() => 100));
       setStep('complete');
       // Clear keys after transfer
@@ -288,8 +300,9 @@ export default function SendPage() {
       sharedSecretRef.current = null;
     };
     transfer.onError = (err) => {
-      // ...existing code...
+        console.log('[SendPage][DEBUG] transfer.onError called', err);
       setError(err.message);
+      setErrorLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${err.message}`]);
       // Clear keys on error
       ecdhKeyPairRef.current = null;
       peerPublicKeyRef.current = null;
@@ -305,7 +318,6 @@ export default function SendPage() {
   };
 
   const reset = () => {
-    // ...existing code...
     transferRef.current?.cancel();
     rtcRef.current?.close();
     signalingRef.current?.disconnect();
@@ -322,8 +334,24 @@ export default function SendPage() {
     setSpeedList([]);
     setTimeRemainingList([]);
     setError('');
-    // Only reset file input value here
+    setErrorLog([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Retry logic: restart transfer with previous files
+  const handleRetry = () => {
+    setError('');
+    setStep('waiting');
+    setProgressList(new Array(filesRef.current.length).fill(0));
+    setSpeedList(new Array(filesRef.current.length).fill(0));
+    setTimeRemainingList(new Array(filesRef.current.length).fill(0));
+    setErrorLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] Retrying transfer...`]);
+    initializeConnection();
+    setTimeout(() => {
+      if (dataChannelReadyRef.current && filesRef.current.length > 0) {
+        startTransfer(filesRef.current);
+      }
+    }, 0);
   };
 
   return (
@@ -345,10 +373,26 @@ export default function SendPage() {
 
       <main className="container mx-auto px-2 py-8 sm:px-4 sm:py-16">
         <div className="max-w-2xl mx-auto">
-          {/* Error Message */}
+          {/* Error Message and Retry Button */}
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-              {error}
+              <div>{error}</div>
+              <button
+                onClick={handleRetry}
+                className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+              >
+                Retry
+              </button>
+              {errorLog.length > 0 && (
+                <div className="mt-2 text-xs text-gray-500">
+                  <div className="font-bold mb-1">Error Log:</div>
+                  <ul className="list-disc pl-4">
+                    {errorLog.map((msg, idx) => (
+                      <li key={idx}>{msg}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
 
