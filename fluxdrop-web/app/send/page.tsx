@@ -2,6 +2,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import dynamic from 'next/dynamic';
+
+const QRCode = dynamic(
+  () => import('qrcode.react').then(mod => mod.QRCodeCanvas),
+  { ssr: false }
+);
+
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Upload, Copy, Check, Wifi } from 'lucide-react';
 import Link from 'next/link';
@@ -402,10 +409,17 @@ export default function SendPage() {
     await transfer.startBatchTransfer(selectedFiles);
   };
 
+  const [copyStatus, setCopyStatus] = useState<'none' | 'code' | 'link'>('none');
   const copyCode = () => {
     navigator.clipboard.writeText(sessionCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopyStatus('code');
+    setTimeout(() => setCopyStatus('none'), 2000);
+  };
+  const copyLink = () => {
+    const url = `${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`;
+    navigator.clipboard.writeText(url);
+    setCopyStatus('link');
+    setTimeout(() => setCopyStatus('none'), 2000);
   };
 
   const reset = () => {
@@ -617,29 +631,83 @@ export default function SendPage() {
                 </div>
               )}
 
-              {/* Session Code */}
-              <div className="bg-blue-50 rounded-xl p-6 mb-6 animate-fade-in">
+
+              {/* Session Code & QR */}
+
+              <div className="bg-blue-50 rounded-xl p-4 sm:p-6 mb-6 animate-fade-in flex flex-col items-center w-full max-w-xs sm:max-w-md mx-auto">
                 <p className="text-sm text-gray-600 mb-2 text-center">Transfer Code</p>
-                <div className="text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 animate-fade-in">
+                <div className="text-5xl sm:text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 animate-fade-in select-all">
                   {sessionCode || '------'}
                 </div>
                 {sessionCode && (
-                  <button
-                    onClick={copyCode}
-                    className="w-full bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 animate-fade-in"
-                  >
-                    {copied ? (
-                      <>
-                        <Check className="w-5 h-5" />
-                        Copied!
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-5 h-5" />
-                        Copy Code
-                      </>
-                    )}
-                  </button>
+                  <>
+                    <div className="mb-4 flex flex-col items-center w-full">
+                      <div className="w-full flex justify-center">
+                        <QRCode value={`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`} size={typeof window !== 'undefined' && window.innerWidth < 400 ? 180 : 220} style={{ width: '100%', height: 'auto', maxWidth: 220, minWidth: 120 }} />
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">{`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`}</div>
+                    </div>
+                    <div className='flex flex-col sm:flex-row m-4 w-full'>
+                      <button
+                        onClick={copyCode}
+                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 animate-fade-in text-base sm:text-lg touch-manipulation"
+                        style={{ minHeight: 48 }}
+                        aria-label="Copy Code"
+                      >
+                        {copyStatus === 'code' ? (
+                          <>
+                            <Check className="w-5 h-5" />
+                            Code Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-5 h-5" />
+                            Copy Code
+                          </>
+                        )}
+                      </button>
+                        </div>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full">
+                      <button
+                        onClick={copyLink}
+                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 animate-fade-in text-base sm:text-lg touch-manipulation"
+                        style={{ minHeight: 48 }}
+                        aria-label="Copy Link"
+                      >
+                        {copyStatus === 'link' ? (
+                          <>
+                            <Check className="w-5 h-5" />
+                            Link Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-5 h-5" />
+                            Copy Link
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => {
+                          const url = `${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`;
+                          if (navigator.share) {
+                            navigator.share({
+                              title: 'FluxDrop Session',
+                              text: 'Join my FluxDrop session:',
+                              url,
+                            });
+                          } else {
+                            copyLink();
+                          }
+                        }}
+                        className="flex-1 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 animate-fade-in text-base sm:text-lg touch-manipulation"
+                        style={{ minHeight: 48 }}
+                        aria-label="Share Link"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 8a3 3 0 00-6 0v4a3 3 0 006 0V8z" /><path strokeLinecap="round" strokeLinejoin="round" d="M19 8v4a7 7 0 01-14 0V8" /></svg>
+                        Share Link
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
 

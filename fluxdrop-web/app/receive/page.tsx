@@ -1,7 +1,11 @@
 // fluxdrop-web/app/receive/page.tsx
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+
+import { useCallback } from 'react';
+import QRScanner from './QRScanner';
+
 import JSZip from 'jszip';
 import { ArrowLeft, Download, Check } from 'lucide-react';
 import Link from 'next/link';
@@ -463,6 +467,316 @@ export default function ReceivePage() {
     }
   };
 
+  // New function: handleJoinSessionWithCode
+  const handleJoinSessionWithCode = async (joinCode: string) => {
+    if (joinCode.length !== 6) {
+      setError('Please enter a 6-digit code');
+      return;
+    }
+    setStep('connecting');
+    setError('');
+    setHandshakeInProgress(true);
+    setBatchMetadata([]);
+    setMetadataList([]);
+    setProgressList([]);
+    setSpeedList([]);
+    setTimeRemainingList([]);
+    setReceivedFiles([]);
+    setFileDebugInfo([]);
+    fileIndexRef.current = 0;
+
+    try {
+      const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || 'ws://localhost:3001';
+      const signaling = new SignalingClient(signalingUrl);
+      signalingRef.current = signaling;
+
+      await signaling.connect();
+
+      const rtc = new RTCConnection({
+        onStateChange: (state) => {
+          if (state === 'failed') {
+            setError('Connection failed. Please try again.');
+          }
+        },
+        onDataChannelOpen: () => {},
+        onMessage: (data) => {
+          transferRef.current?.handleMessage(data);
+        },
+        onError: (err) => {
+          if (typeof err === 'object' && err !== null) {
+            if ('name' in err) console.log('[ReceivePage][DEBUG] err.name:', (err as any).name);
+            if ('message' in err) console.log('[ReceivePage][DEBUG] err.message:', (err as any).message);
+          }
+          const isOpError = (e: unknown): e is { name: string; message?: string } =>
+            typeof e === 'object' && e !== null && 'name' in e && typeof (e as any).name === 'string';
+          let opError: { name: string; message?: string } | undefined = undefined;
+          if (typeof err === 'object' && err !== null && 'name' in err && (err as any).name === 'OperationError') {
+            opError = err as any;
+          }
+          if (err.message === 'Data channel error' || opError) {
+            if (stepRef.current === 'complete' || transferCompleteRef.current) {
+              if (opError && (opError.message?.includes('User-Initiated Abort') || opError.message?.includes('Close called'))) {
+                return;
+              }
+              if (isMountedRef.current) setError('Warning: Sender disconnected. You can still download your files.');
+            } else {
+              if (isMountedRef.current) {
+                setError('Connection lost. The sender has reset or closed the session. You may be able to resume the transfer.');
+                setResumeAvailable(true);
+                setResumeInProgress(false);
+              }
+            }
+          } else {
+            if (isMountedRef.current) setError(err.message);
+          }
+        }
+      });
+      rtcRef.current = rtc;
+
+      await rtc.initialize('receiver');
+
+      // Register all signaling handlers BEFORE joinSession
+      signaling.on('session-joined', async () => {
+        const keyPair = await generateECDHKeyPair();
+        ecdhKeyPairRef.current = keyPair;
+        const exported = await exportPublicKey(keyPair.publicKey);
+        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+        signaling.sendPublicKey(pubKeyB64);
+        console.log('Joined session, public key sent');
+        setStep('receiving');
+      });
+      signaling.on('peer-disconnected', () => {
+        console.warn('[ReceivePage] Peer disconnected');
+        if (!isMountedRef.current) return;
+        if (step === 'complete') {
+          setError('Warning: Sender disconnected. You can still download your files.');
+        } else {
+          setError('Sender disconnected. Please try again or receive more files.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+          setBatchMetadata([]);
+          setMetadataList([]);
+          setProgressList([]);
+          setSpeedList([]);
+          setTimeRemainingList([]);
+          setReceivedFiles([]);
+          setHandshakeInProgress(false);
+          fileIndexRef.current = 0;
+        }
+      });
+      signaling.on('session-cancel', () => {
+        if (!isMountedRef.current) return;
+        if (step === 'complete') {
+          setError('Warning: Sender cancelled the session. You can still download your files.');
+        } else {
+          setError('Sender cancelled the session. Please start a new transfer.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+          setBatchMetadata([]);
+          setMetadataList([]);
+          setProgressList([]);
+          setSpeedList([]);
+          setTimeRemainingList([]);
+          setReceivedFiles([]);
+          setHandshakeInProgress(false);
+          fileIndexRef.current = 0;
+        }
+      });
+      signaling.on('session-reset', () => {
+        if (!isMountedRef.current) return;
+        if (step === 'complete') {
+          setError('Warning: Sender reset the session. You can still download your files.');
+        } else {
+          setError('Sender reset the session. Please start a new transfer.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+          setBatchMetadata([]);
+          setMetadataList([]);
+          setProgressList([]);
+          setSpeedList([]);
+          setTimeRemainingList([]);
+          setReceivedFiles([]);
+          setHandshakeInProgress(false);
+          fileIndexRef.current = 0;
+        }
+      });
+      signaling.on('public-key', async (message) => {
+        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
+        const peerKey = await importPublicKey(raw.buffer);
+        peerPublicKeyRef.current = peerKey;
+        if (ecdhKeyPairRef.current) {
+          sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
+          console.log('[ReceivePage] Shared secret derived');
+        }
+      });
+      signaling.on('offer', async (message) => {
+        await rtc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+        const answer = await rtc.createAnswer();
+        signaling.sendAnswer(answer.sdp!);
+      });
+      signaling.on('ice-candidate', async (message) => {
+        await rtc.addIceCandidate(message.candidate);
+      });
+      signaling.on('error', (message) => {
+        if (!isMountedRef.current) return;
+        if (step === 'complete') {
+          setError('Warning: Signaling error after transfer. You can still download your files.');
+        } else {
+          setError(message.error || 'Session not found or expired. Please check the code and try again.');
+          setStep('enter-code');
+          rtcRef.current?.close();
+          signalingRef.current?.disconnect();
+          setBatchMetadata([]);
+          setMetadataList([]);
+          setProgressList([]);
+          setSpeedList([]);
+          setTimeRemainingList([]);
+          setReceivedFiles([]);
+          setHandshakeInProgress(false);
+          fileIndexRef.current = 0;
+        }
+      });
+      rtc.onIceCandidate = (candidate) => {
+        signaling.sendIceCandidate(candidate);
+      };
+
+      // Handshake polling with timeout
+      let attempts = 0;
+      const maxAttempts = 100; // 5 seconds
+      const setupTransferReceiver = () => {
+        if (!sharedSecretRef.current) {
+          setError('Encryption handshake not complete. Please wait for the connection to establish before receiving files.');
+          console.error('[ReceivePage] Cannot start receiving: shared secret not set.');
+          return;
+        }
+        let transfer = new FileTransferReceiver();
+        transfer.setDecryptionKey(sharedSecretRef.current);
+        transferRef.current = transfer;
+        transfer.onBatchMetadata = (batch) => {
+          const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
+          if (!files) return;
+          setBatchMetadata((prev) => (prev.length === 0 ? files : prev));
+          setMetadataList(files.map(() => null));
+          setProgressList(new Array(files.length).fill(0));
+          setSpeedList(new Array(files.length).fill(0));
+          setTimeRemainingList(new Array(files.length).fill(0));
+          setReceivedFiles(new Array(files.length).fill(null));
+          fileIndexRef.current = 0;
+        };
+        transfer.onMetadata = (meta: FileMetadata) => {
+          setMetadataList((prev) => {
+            const updated = [...prev];
+            let idx = batchMetadata.findIndex(
+              (m) => m.name === meta.name && m.size === meta.size && m.type === meta.type
+            );
+            if (idx === -1) idx = updated.findIndex((m) => m === null);
+            if (idx === -1) idx = fileIndexRef.current;
+            updated[idx] = meta;
+            return updated;
+          });
+          setStep('receiving');
+        };
+        transfer.onProgress = (prog: any) => {
+          setProgressList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.percentage;
+            return updated;
+          });
+          setSpeedList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.speed;
+            return updated;
+          });
+          setTimeRemainingList((prev) => {
+            const updated = [...prev];
+            updated[fileIndexRef.current] = prog.timeRemaining;
+            return updated;
+          });
+        };
+        transfer.onComplete = async (file: Blob, completedFileIndex: number) => {
+          const arrayBuffer = await file.arrayBuffer();
+          const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+          const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+          const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+          setFileDebugInfo((prev) => {
+            const updated = [...prev];
+            updated[completedFileIndex] = {
+              hash: hashB64,
+              type: file.type,
+              size: file.size,
+              hex
+            };
+            return updated;
+          });
+          setMetadataList((prev) => {
+            const updated = [...prev];
+            if (!updated[completedFileIndex] && batchMetadata[completedFileIndex]) {
+              updated[completedFileIndex] = batchMetadata[completedFileIndex];
+            }
+            return updated;
+          });
+          setReceivedFiles((prev) => {
+            const updated = [...prev];
+            updated[completedFileIndex] = file;
+            const totalFiles = batchMetadata.length || 1;
+            const receivedCount = updated.filter(Boolean).length;
+            if (receivedCount >= totalFiles) {
+              transferCompleteRef.current = true;
+              setStep('complete');
+              ecdhKeyPairRef.current = null;
+              peerPublicKeyRef.current = null;
+              sharedSecretRef.current = null;
+            }
+            return updated;
+          });
+          fileIndexRef.current++;
+        };
+        transfer.onError = (err) => {
+          if (isMountedRef.current) setError(err.message);
+          ecdhKeyPairRef.current = null;
+          peerPublicKeyRef.current = null;
+          sharedSecretRef.current = null;
+        };
+      };
+      const waitForSharedSecret = () => {
+        if (sharedSecretRef.current) {
+          setHandshakeInProgress(false);
+          setupTransferReceiver();
+        } else if (attempts++ < maxAttempts) {
+          setTimeout(waitForSharedSecret, 50);
+        } else {
+          setError('Handshake timeout. Please try again.');
+          setStep('enter-code');
+          setHandshakeInProgress(false);
+        }
+      };
+      waitForSharedSecret();
+
+      signaling.joinSession(joinCode);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      if (step === 'complete') {
+        setError('Warning: Connection error after transfer. You can still download your files.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to connect');
+        setStep('enter-code');
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
+        setBatchMetadata([]);
+        setMetadataList([]);
+        setProgressList([]);
+        setSpeedList([]);
+        setTimeRemainingList([]);
+        setReceivedFiles([]);
+        setHandshakeInProgress(false);
+        fileIndexRef.current = 0;
+      }
+    }
+  };
+
   const getFallbackMeta = (file: Blob | null, idx: number) => {
     if (!file) return null;
     return {
@@ -498,15 +812,14 @@ export default function ReceivePage() {
     signalingRef.current?.disconnect();
     transferRef.current?.reset();
     setStep('enter-code');
-    setCode('');
+    // setCode(''); // Do not clear code on reset
     setBatchMetadata([]);
     setMetadataList([]);
     setProgressList([]);
     setSpeedList([]);
     setTimeRemainingList([]);
     setReceivedFiles([]);
-    setError('');
-    setHandshakeInProgress(false);
+    setFileDebugInfo([]);
     fileIndexRef.current = 0;
   };
 
@@ -568,7 +881,7 @@ export default function ReceivePage() {
             </div>
           )}
 
-          {/* Enter Code */}
+          {/* Enter Code or Scan QR */}
           {step === 'enter-code' && (
             <div className="bg-white rounded-2xl shadow-xl p-8">
               <div className="text-center mb-8">
@@ -576,10 +889,10 @@ export default function ReceivePage() {
                   <Download className="w-10 h-10 text-purple-600" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900 mb-2">Receive a File</h2>
-                <p className="text-gray-600">Enter the 6-digit code from the sender</p>
+                <p className="text-gray-600">Enter the 6-digit code from the sender or scan QR</p>
               </div>
 
-              <div className="mb-6">
+              <div className="mb-6 flex flex-col gap-4 items-center">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Transfer Code
                 </label>
@@ -591,6 +904,11 @@ export default function ReceivePage() {
                   placeholder="000000"
                   className="w-full text-4xl font-bold text-center tracking-widest p-4 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none"
                   autoFocus
+                />
+                <ScanQrSection
+                  code={code}
+                  setCode={setCode}
+                  onConnect={handleJoinSessionWithCode}
                 />
               </div>
 
@@ -796,6 +1114,44 @@ export default function ReceivePage() {
           {/* Debug UI removed */}
         </div>
       </main>
+    </div>
+  );
+}
+
+
+function ScanQrSection({ code, setCode, onConnect }: { code: string, setCode: (c: string) => void, onConnect: (scannedCode: string) => void }) {
+  const [showScanner, setShowScanner] = useState(false);
+  const handleResult = useCallback((text: string) => {
+    // Try to extract code from URL or plain code
+    let match = text.match(/code=([A-Z0-9]{6})/i);
+    let found = match ? match[1] : text.match(/[A-Z0-9]{6}/i)?.[0];
+    if (found) {
+      const scanned = found.toUpperCase();
+      setCode(scanned);
+      setShowScanner(false);
+      if (scanned.length === 6) {
+        onConnect(scanned);
+      }
+    }
+  }, [setCode, onConnect]);
+  return (
+    <div className="w-full flex flex-col items-center">
+      <button
+        type="button"
+        className="mt-2 mb-2 px-4 py-3 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 font-semibold w-full max-w-xs text-base sm:text-lg touch-manipulation"
+        style={{ minHeight: 48 }}
+        onClick={() => setShowScanner((v) => !v)}
+      >
+        {showScanner ? 'Close QR Scanner' : 'Scan QR Code'}
+      </button>
+      {showScanner && (
+        <div className="w-full flex flex-col items-center">
+          <div className="w-full max-w-xs aspect-square rounded-lg overflow-hidden border border-purple-200 bg-black">
+            <QRScanner onResult={handleResult} />
+          </div>
+          <div className="text-xs text-gray-500 mt-2">Point your camera at the sender's QR code</div>
+        </div>
+      )}
     </div>
   );
 }
