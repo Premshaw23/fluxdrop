@@ -525,15 +525,15 @@ export default function ReceivePage() {
           animation: bounce-once 0.6s ease-in-out;
         }
       `}</style>
-      
-      <header className="border-b bg-white/80 backdrop-blur-md shadow-sm">
+
+      <header className="border-b bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-20">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 transition-colors">
+          <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 font-semibold transition-colors">
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
           {isOffline && (
-            <span className="text-red-600 font-semibold text-sm">Offline</span>
+            <span className="text-red-600 font-semibold text-sm animate-pulse">Offline</span>
           )}
         </div>
       </header>
@@ -549,8 +549,8 @@ export default function ReceivePage() {
         <div className="max-w-2xl mx-auto">
 
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-lg text-red-700 shadow-sm">
-              {error}
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow animate-shake">
+              <div className="font-bold text-lg mb-1">{error}</div>
             </div>
           )}
 
@@ -568,13 +568,13 @@ export default function ReceivePage() {
           )}
 
           {step === 'enter-code' && (
-            <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 border border-gray-100 animate-fade-in">
               <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-4 shadow-sm">
-                  <Download className="w-10 h-10 text-purple-500" />
+                <div className="w-20 h-20 bg-linear-to-br from-purple-200 via-purple-50 to-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg animate-pop-in">
+                  <Download className="w-12 h-12 text-purple-500" />
                 </div>
-                <h2 className="text-3xl font-bold mb-2 text-purple-500">Receive Files</h2>
-                <p className="text-gray-600">Enter the 6-digit code or scan QR</p>
+                <h2 className="text-3xl font-extrabold mb-2 text-purple-500 tracking-tight">Receive Files</h2>
+                <p className="text-gray-600 text-base">Enter the 6-digit code or scan QR</p>
               </div>
 
               <div className="mb-6">
@@ -584,7 +584,7 @@ export default function ReceivePage() {
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
                   placeholder="000000"
-                  className="w-full text-4xl font-bold text-center text-purple-500 tracking-widest p-4 border-2 border-purple-100 rounded-lg focus:border-purple-400 bg-purple-50/50"
+                  className="w-full text-4xl font-bold text-center text-purple-500 tracking-widest p-4 border-2 border-purple-200 rounded-lg focus:border-purple-400 bg-purple-50/70 shadow"
                   autoFocus
                 />
               </div>
@@ -594,9 +594,9 @@ export default function ReceivePage() {
               <button
                 onClick={() => handleJoinSession()}
                 disabled={code.length !== 6}
-                className="w-full bg-purple-500 text-white py-4 rounded-lg hover:bg-purple-600 disabled:bg-purple-100 disabled:text-purple-300 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400"
+                className="w-full bg-purple-500 text-white py-4 rounded-lg hover:bg-purple-600 disabled:bg-purple-100 disabled:text-purple-300 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 shadow-lg"
               >
-                Connect
+                <Download className="w-5 h-5 mr-2 inline-block" />Connect
               </button>
             </div>
           )}

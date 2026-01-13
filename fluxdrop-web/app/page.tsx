@@ -1,7 +1,5 @@
 // fluxdrop-web/app/page.tsx
-'use client';
 
-import { useState } from 'react';
 import { Upload, Download, Zap } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -72,6 +70,35 @@ export default function HomePage() {
         </div>
 
         {/* Features */}
+        {/* How It Works Section */}
+        <section aria-label="How It Works" className="max-w-4xl mx-auto mb-16">
+          <h3 className="text-2xl font-bold text-gray-900 mb-8 text-center">How It Works</h3>
+          <div className="grid md:grid-cols-3 gap-8">
+            <div className="text-center">
+              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Upload className="w-6 h-6 text-blue-600" />
+              </div>
+              <h4 className="font-semibold text-gray-900 mb-2">1. Select & Send</h4>
+              <p className="text-gray-600 text-sm">Choose files to send. Get a unique code to share with your recipient.</p>
+            </div>
+            <div className="text-center">
+              <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Download className="w-6 h-6 text-purple-600" />
+              </div>
+              <h4 className="font-semibold text-gray-900 mb-2">2. Enter Code</h4>
+              <p className="text-gray-600 text-sm">Recipient enters the code or scans the QR to connect instantly.</p>
+            </div>
+            <div className="text-center">
+              <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Zap className="w-6 h-6 text-green-600" />
+              </div>
+              <h4 className="font-semibold text-gray-900 mb-2">3. Transfer & Download</h4>
+              <p className="text-gray-600 text-sm">Files are sent directly, securely, and can be downloaded instantly.</p>
+            </div>
+          </div>
+        </section>
+
+        {/* Features */}
         <section aria-label="Features" className="max-w-4xl mx-auto">
           <div className="grid md:grid-cols-3 gap-8">
             <div className="text-center">
@@ -94,6 +121,25 @@ export default function HomePage() {
               </div>
               <h3 className="font-semibold text-gray-900 mb-2">Universal</h3>
               <p className="text-gray-600 text-sm">Works on any device with a browser</p>
+            </div>
+          </div>
+        </section>
+
+        {/* FAQ Section */}
+        <section aria-label="FAQ" className="max-w-3xl mx-auto mt-16">
+          <h3 className="text-xl font-bold text-gray-900 mb-6 text-center">Frequently Asked Questions</h3>
+          <div className="space-y-6">
+            <div>
+              <h4 className="font-semibold text-gray-800 mb-2">Is my data private?</h4>
+              <p className="text-gray-600 text-sm">Yes. Files are sent directly between devices using end-to-end encryption. No files are stored on any server, and no accounts are required.</p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-gray-800 mb-2">How fast is the transfer?</h4>
+              <p className="text-gray-600 text-sm">Transfers use direct P2P connections, so you get maximum speed—often as fast as your local network allows.</p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-gray-800 mb-2">What devices are supported?</h4>
+              <p className="text-gray-600 text-sm">FluxDrop works on any device with a modern browser—phones, tablets, laptops, desktops. No installation needed.</p>
             </div>
           </div>
         </section>
