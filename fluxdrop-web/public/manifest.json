@@ -5,8 +5,8 @@
 	"description": "Share files instantly between devices. Zero setup, end-to-end encrypted, no storage.",
 	"start_url": "/",
 	"display": "standalone",
-	"theme_color": "#0f172a",
-	"background_color": "#020617",
+	"theme_color": "#f1f5f9",
+	"background_color": "#ffffff",
 	"icons": [
 		{
 			"src": "icons/logo-16x16.png",

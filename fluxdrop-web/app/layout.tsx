@@ -22,22 +22,22 @@ export default function RootLayout({
     <html lang="en">
       <head>
         {/* Google Analytics */}
-        <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-3qjYnT7GW81-zwJBwv3wJABvxbiSOgDyAlTCKxh9nEs"></script>
         <script dangerouslySetInnerHTML={{
           __html: `
             window.dataLayer = window.dataLayer || [];
             function gtag(){dataLayer.push(arguments);}
             gtag('js', new Date());
-            gtag('config', 'G-XXXXXXXXXX');
+            gtag('config', 'G-3qjYnT7GW81-zwJBwv3wJABvxbiSOgDyAlTCKxh9nEs');
           `
         }} />
-        <link rel="canonical" href="https://fluxdrop.com/" />
+        <link rel="canonical" href="https://flux-drop.vercel.app/" />
         <script type="application/ld+json" dangerouslySetInnerHTML={{
           __html: JSON.stringify({
             "@context": "https://schema.org",
             "@type": "Organization",
             "name": "FluxDrop",
-            "url": "https://fluxdrop.com",
+            "url": "https://flux-drop.vercel.app/",
             "logo": "/icons/logo-512x512.png"
           })
         }} />
@@ -62,7 +62,8 @@ export default function RootLayout({
         <meta property="og:description" content="Share files instantly between devices. Zero setup, end-to-end encrypted, no storage." />
         <meta property="og:image" content="/icons/logo-512x512.png" />
         <meta property="og:type" content="website" />
-        <meta property="og:url" content="https://fluxdrop.com" />
+        <meta name="google-site-verification" content="3qjYnT7GW81-zwJBwv3wJABvxbiSOgDyAlTCKxh9nEs" />
+        <meta property="og:url" content="https://flux-drop.vercel.app/" />
         <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content="FluxDrop - Instant File Sharing" />
         <meta name="twitter:description" content="Share files instantly between devices. Zero setup, end-to-end encrypted, no storage." />

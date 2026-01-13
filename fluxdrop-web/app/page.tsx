@@ -7,7 +7,7 @@ import Link from 'next/link';
 
 export default function HomePage() {
   return (
-    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-linear-to-br from-blue-100 via-white to-purple-100">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm" role="banner">
         <div className="container mx-auto px-4 py-4">
