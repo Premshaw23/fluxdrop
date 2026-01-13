@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { useCallback } from 'react';
-import QRScanner from './QRScanner';
+import dynamic from 'next/dynamic';
+const QRScanner = dynamic(() => import('./QRScanner'), { ssr: false, loading: () => <div className="w-full h-40 flex items-center justify-center text-gray-400">Loading scanner…</div> });
 
 import JSZip from 'jszip';
 import { ArrowLeft, Download, Check } from 'lucide-react';
@@ -1024,6 +1025,7 @@ export default function ReceivePage() {
                                   alt={meta.name}
                                   style={{ maxWidth: 120, maxHeight: 80, borderRadius: 8, border: '1px solid #eee' }}
                                   loading="lazy"
+                                  decoding="async"
                                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                 />
                               )}

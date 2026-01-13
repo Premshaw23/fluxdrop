@@ -20,6 +20,27 @@ import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecr
 type Step = 'select' | 'waiting' | 'connected' | 'transferring' | 'complete';
 
 export default function SendPage() {
+      // Handle send button click
+      const handleSend = () => {
+        if (!filesRef.current.length) {
+          setError('Please select at least one file or folder to send.');
+          setStep('select');
+          return;
+        }
+        setError('');
+        setStep('waiting');
+        setProgressList(new Array(filesRef.current.length).fill(0));
+        setSpeedList(new Array(filesRef.current.length).fill(0));
+        setTimeRemainingList(new Array(filesRef.current.length).fill(0));
+        setErrorLog([]);
+        dataChannelReadyRef.current = false;
+        setReadyToSend(false);
+        initializeConnection();
+        // Transfer will start when both ready (see useEffect)
+      };
+    // Option: send as zip
+    const [sendAsZip, setSendAsZip] = useState(false);
+    const [readyToSend, setReadyToSend] = useState(false);
   // Resume state
   const [resumeAvailable, setResumeAvailable] = useState(false);
   const [resumeInProgress, setResumeInProgress] = useState(false);
@@ -90,35 +111,73 @@ export default function SendPage() {
 
   const handleFiles = (selectedFiles: File[]) => {
     if (selectedFiles.length === 0) return;
-    // Always reset sender state before starting a new transfer
-    transferRef.current?.cancel();
-    rtcRef.current?.close();
-    signalingRef.current?.disconnect();
-    dataChannelReadyRef.current = false;
-    filesRef.current = [];
-    transferRef.current = null;
-    rtcRef.current = null;
-    signalingRef.current = null;
-    // Sort files by webkitRelativePath if present, else by name
+    // Sort new files
     const sortedFiles = [...selectedFiles].sort((a, b) => {
       const aPath = (a as any).webkitRelativePath || a.name;
       const bPath = (b as any).webkitRelativePath || b.name;
       return aPath.localeCompare(bPath);
     });
-    setFiles(sortedFiles);
-    filesRef.current = sortedFiles;
-    setProgressList(new Array(selectedFiles.length).fill(0));
-    setSpeedList(new Array(selectedFiles.length).fill(0));
-    setTimeRemainingList(new Array(selectedFiles.length).fill(0));
-    setStep('waiting');
-    setError('');
-    setErrorLog([]);
-    initializeConnection();
-    setTimeout(() => {
-      if (dataChannelReadyRef.current && filesRef.current.length > 0) {
-        startTransfer(filesRef.current);
-      }
-    }, 0);
+
+    // If sendAsZip is checked and we're adding multiple files or folders
+    if (sendAsZip && sortedFiles.length > 0 && (sortedFiles.length > 1 || (sortedFiles[0] as any).webkitRelativePath)) {
+      import('jszip').then(JSZipModule => {
+        const JSZip = JSZipModule.default;
+        const zip = new JSZip();
+        // Combine existing files + new files
+        const allFiles = [...filesRef.current, ...sortedFiles];
+        allFiles.forEach(f => {
+          const relPath = (f as any).webkitRelativePath || f.name;
+          zip.file(relPath, f);
+        });
+        zip.generateAsync({ type: 'blob' }).then(blob => {
+          const zipFile = new File([blob], 'fluxdrop-files.zip', { type: 'application/zip' });
+          setFiles([zipFile]);
+          filesRef.current = [zipFile];
+          setProgressList([0]);
+          setSpeedList([0]);
+          setTimeRemainingList([0]);
+          setReadyToSend(true);
+        });
+      });
+      return;
+    }
+
+    // ADD to existing files instead of replacing
+    const updatedFiles = [...filesRef.current, ...sortedFiles];
+    // Remove duplicates based on name and size
+    const uniqueFiles = updatedFiles.filter((file, index, self) =>
+      index === self.findIndex(f => f.name === file.name && f.size === file.size)
+    );
+    setFiles(uniqueFiles);
+    filesRef.current = uniqueFiles;
+    setProgressList(new Array(uniqueFiles.length).fill(0));
+    setSpeedList(new Array(uniqueFiles.length).fill(0));
+    setTimeRemainingList(new Array(uniqueFiles.length).fill(0));
+    setReadyToSend(true);
+  };
+
+  // Remove a single file by index
+  const removeFile = (index: number) => {
+    const updatedFiles = files.filter((_, idx) => idx !== index);
+    setFiles(updatedFiles);
+    filesRef.current = updatedFiles;
+    setProgressList(new Array(updatedFiles.length).fill(0));
+    setSpeedList(new Array(updatedFiles.length).fill(0));
+    setTimeRemainingList(new Array(updatedFiles.length).fill(0));
+    if (updatedFiles.length === 0) {
+      setReadyToSend(false);
+    }
+  };
+
+  // Remove all files
+  const removeAllFiles = () => {
+    setFiles([]);
+    filesRef.current = [];
+    setProgressList([]);
+    setSpeedList([]);
+    setTimeRemainingList([]);
+    setReadyToSend(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -340,10 +399,15 @@ export default function SendPage() {
 
   // Multi-file batch transfer using new protocol
   const startTransfer = async (selectedFiles: File[]) => {
-      console.log('[SendPage][DEBUG] startTransfer called', { selectedFiles, rtcRef: rtcRef.current });
-    // ...existing code...
-    if (!selectedFiles.length || !rtcRef.current) {
-      // ...existing code...
+    if (!selectedFiles.length) {
+      setError('No files selected. Please select at least one file or folder to send.');
+      setStep('select');
+      return;
+    }
+    console.log('[SendPage][DEBUG] startTransfer called', { selectedFiles, rtcRef: rtcRef.current });
+    if (!rtcRef.current) {
+      setError('Connection not established. Please try again.');
+      setStep('select');
       return;
     }
 
@@ -455,6 +519,12 @@ export default function SendPage() {
 
   // Retry logic: restart transfer with previous files
   const handleRetry = () => {
+    // Check if files are still selected
+    if (filesRef.current.length === 0 || files.length === 0) {
+      setError('No files selected. Please select files to continue.');
+      setStep('select');
+      return;
+    }
     setError('');
     setStep('waiting');
     setProgressList(new Array(filesRef.current.length).fill(0));
@@ -500,12 +570,15 @@ export default function SendPage() {
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
               <div>{error}</div>
-              <button
-                onClick={handleRetry}
-                className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
-              >
-                Retry
-              </button>
+              {/* Only show retry button if files are still selected */}
+              {filesRef.current.length > 0 && files.length > 0 ? (
+                <button
+                  onClick={handleRetry}
+                  className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+                >
+                  Retry
+                </button>
+              ) : null}
               {errorLog.length > 0 && (
                 <div className="mt-2 text-xs text-gray-500">
                   <div className="font-bold mb-1">Error Log:</div>
@@ -544,7 +617,20 @@ export default function SendPage() {
                 <p className="text-gray-600">Choose one or more files or a folder to share instantly</p>
               </div>
 
+
               <div className="flex flex-col sm:flex-row gap-4 mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    id="sendAsZip"
+                    type="checkbox"
+                    checked={sendAsZip}
+                    onChange={e => setSendAsZip(e.target.checked)}
+                    className="mr-2"
+                  />
+                  <label htmlFor="sendAsZip" className="text-sm text-gray-700 select-none cursor-pointer">
+                    Send as ZIP (preserves folder structure)
+                  </label>
+                </div>
                 <label className="block w-full">
                   <input
                     type="file"
@@ -555,10 +641,11 @@ export default function SendPage() {
                   />
                   <button
                     type="button"
-                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold mb-2"
+                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold mb-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     onClick={() => fileInputRef.current?.click()}
+                    aria-label={files.length > 0 ? 'Add more files' : 'Select files'}
                   >
-                    Select Files
+                    {files.length > 0 ? 'Add More Files' : 'Select Files'}
                   </button>
                 </label>
                 <label className="block w-full">
@@ -578,19 +665,21 @@ export default function SendPage() {
                   />
                   <button
                     type="button"
-                    className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold mb-2"
+                    className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold mb-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
                     onClick={e => {
-                      const input = (e.currentTarget.parentElement?.querySelector('input[type=\"file\"]') as HTMLInputElement);
+                      const input = (e.currentTarget.parentElement?.querySelector('input[type="file"]') as HTMLInputElement);
                       input?.click();
                     }}
+                    aria-label={files.length > 0 ? 'Add folder' : 'Select folder'}
                   >
-                    Select Folder
+                    {files.length > 0 ? 'Add Folder' : 'Select Folder'}
                   </button>
                 </label>
               </div>
 
+
               <div
-                className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors select-none ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50'}`}
+                className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors select-none ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50'} focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -598,9 +687,16 @@ export default function SendPage() {
                 tabIndex={0}
                 aria-label="Select files to send"
                 style={{ touchAction: 'manipulation' }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    fileInputRef.current?.click();
+                  }
+                }}
               >
                 <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                <p className="text-lg text-gray-700 mb-2">Tap or drag files or folders here</p>
+                <p className="text-lg text-gray-700 mb-2">
+                  {files.length > 0 ? 'Add more files or folders' : 'Tap or drag files or folders here'}
+                </p>
                 <p className="text-sm text-gray-500">Any file up to 2GB each. Folder structure will be preserved.</p>
                 {isDragActive && (
                   <div className="mt-2 text-blue-600 font-semibold">Drop files or folders to select</div>
@@ -609,40 +705,69 @@ export default function SendPage() {
 
               {/* Selected files preview */}
               {files.length > 0 && (
-                <div className="mt-4 sm:mt-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                  {files.map((f, idx) => {
-                    const isImage = f.type.startsWith('image/');
-                    const isVideo = f.type.startsWith('video/');
-                    const isAudio = f.type.startsWith('audio/');
-                    return (
-                      <div key={f.name + f.size} className="bg-gray-50 rounded-lg p-4 flex flex-col items-center shadow">
-                        {isImage ? (
-                          <img
-                            src={URL.createObjectURL(f)}
-                            alt={f.name}
-                            className="w-24 h-24 object-cover rounded mb-2 border"
-                            loading="lazy"
-                            onLoad={e => URL.revokeObjectURL((e.target as HTMLImageElement).src)}
-                          />
-                        ) : isVideo ? (
-                          <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-xs text-gray-500">Video</span>
-                          </div>
-                        ) : isAudio ? (
-                          <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-xs text-gray-500">Audio</span>
-                          </div>
-                        ) : (
-                          <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-xs text-gray-500">{f.type ? f.type.split('/')[1] : 'File'}</span>
-                          </div>
-                        )}
-                        <span className="font-medium text-gray-900 break-all text-center text-sm mb-1">{f.name}</span>
-                        <span className="text-xs text-gray-600">{formatBytes(f.size)}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+                <>
+                  <div className="mt-4 flex justify-between items-center mb-2">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      Selected Files ({files.length})
+                    </h3>
+                    <button
+                      onClick={removeAllFiles}
+                      className="text-sm text-red-600 hover:text-red-700 font-semibold px-3 py-1 rounded border border-red-300 hover:bg-red-50 transition"
+                    >
+                      Remove All
+                    </button>
+                  </div>
+                  <div className="mt-4 sm:mt-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                    {files.map((f, idx) => {
+                      const isImage = f.type.startsWith('image/');
+                      const isVideo = f.type.startsWith('video/');
+                      const isAudio = f.type.startsWith('audio/');
+                      return (
+                        <div key={f.name + f.size + idx} className="bg-gray-50 rounded-lg p-4 flex flex-col items-center shadow relative">
+                          {/* Remove button for individual file */}
+                          <button
+                            onClick={() => removeFile(idx)}
+                            className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600 transition text-xs font-bold"
+                            aria-label="Remove file"
+                          >
+                            ×
+                          </button>
+                          {isImage ? (
+                            <img
+                              src={URL.createObjectURL(f)}
+                              alt={f.name}
+                              className="w-24 h-24 object-cover rounded mb-2 border"
+                              loading="lazy"
+                              onLoad={e => URL.revokeObjectURL((e.target as HTMLImageElement).src)}
+                            />
+                          ) : isVideo ? (
+                            <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-xs text-gray-500">Video</span>
+                            </div>
+                          ) : isAudio ? (
+                            <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-xs text-gray-500">Audio</span>
+                            </div>
+                          ) : (
+                            <div className="w-24 h-24 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-xs text-gray-500">{f.type ? f.type.split('/')[1] : 'File'}</span>
+                            </div>
+                          )}
+                          <span className="font-medium text-gray-900 break-all text-center text-sm mb-1">{f.name}</span>
+                          <span className="text-xs text-gray-600">{formatBytes(f.size)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {readyToSend && (
+                    <button
+                      className="mt-6 w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-semibold text-lg"
+                      onClick={handleSend}
+                    >
+                      Send {files.length} {files.length === 1 ? 'File' : 'Files'}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}
