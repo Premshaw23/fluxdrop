@@ -1,7 +1,7 @@
 // fluxdrop-web/app/send/page.tsx
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 
 const QRCode = dynamic(
@@ -20,110 +20,192 @@ import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecr
 type Step = 'select' | 'waiting' | 'connected' | 'transferring' | 'complete';
 
 export default function SendPage() {
-      // Handle send button click
-      const handleSend = () => {
-        if (!filesRef.current.length) {
-          setError('Please select at least one file or folder to send.');
-          setStep('select');
-          return;
-        }
-        setError('');
-        setStep('waiting');
-        setProgressList(new Array(filesRef.current.length).fill(0));
-        setSpeedList(new Array(filesRef.current.length).fill(0));
-        setTimeRemainingList(new Array(filesRef.current.length).fill(0));
-        setErrorLog([]);
-        dataChannelReadyRef.current = false;
-        setReadyToSend(false);
-        initializeConnection();
-        // Transfer will start when both ready (see useEffect)
-      };
-    // Option: send as zip
-    const [sendAsZip, setSendAsZip] = useState(false);
-    const [readyToSend, setReadyToSend] = useState(false);
-  // Resume state
-  const [resumeAvailable, setResumeAvailable] = useState(false);
-  const [resumeInProgress, setResumeInProgress] = useState(false);
-  // Connection quality/type indicator state
-  const [connectionType, setConnectionType] = useState<string>('');
-  const [connectionQuality, setConnectionQuality] = useState<string>('');
-  const [isOffline, setIsOffline] = useState<boolean>(false);
-  useEffect(() => {
-    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
-      setIsOffline(!navigator.onLine);
-    }
-  }, []);
-    // Add state to store file debug info
-    const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
-  // ECDH state
-  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
-  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
-  const sharedSecretRef = useRef<CryptoKey | null>(null);
-    // Drag & drop state
-    const [isDragActive, setIsDragActive] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement | null>(null);
   const router = useRouter();
+  
+  // State management
   const [step, setStep] = useState<Step>('select');
+  const stepRef = useRef<Step>('select');
+  useEffect(() => { stepRef.current = step; }, [step]);
+  
   const [files, setFiles] = useState<File[]>([]);
   const [sessionCode, setSessionCode] = useState('');
-  const [copied, setCopied] = useState(false);
   const [progressList, setProgressList] = useState<number[]>([]);
   const [speedList, setSpeedList] = useState<number[]>([]);
   const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
   const [error, setError] = useState('');
   const [errorLog, setErrorLog] = useState<string[]>([]);
-
+  
+  // Options
+  const [sendAsZip, setSendAsZip] = useState(false);
+  const [readyToSend, setReadyToSend] = useState(false);
+  
+  // Resume state
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [resumeInProgress, setResumeInProgress] = useState(false);
+  
+  // Connection quality/type indicator state
+  const [connectionType, setConnectionType] = useState<string>('');
+  const [connectionQuality, setConnectionQuality] = useState<string>('');
+  const [isOffline, setIsOffline] = useState<boolean>(false);
+  
+  // Debug info
+  const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
+  
+  // Copy status
+  const [copyStatus, setCopyStatus] = useState<'none' | 'code' | 'link'>('none');
+  
+  // Drag & drop state
+  const [isDragActive, setIsDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  
+  // ECDH state
+  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
+  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
+  const sharedSecretRef = useRef<CryptoKey | null>(null);
+  
+  // Connection refs
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferSender | null>(null);
   const dataChannelReadyRef = useRef(false);
   const filesRef = useRef<File[]>([]);
+  
+  // CRITICAL FIX: Track transfer completion state
+  const transferCompleteRef = useRef(false);
+  const filesSuccessfullySentRef = useRef(false);
+  const transferStartedRef = useRef(false);
+  
+  // CRITICAL FIX: Track component mounted state
+  const isMountedRef = useRef(true);
+  
+  // CRITICAL FIX: Prevent duplicate operations
+  const isResettingRef = useRef(false);
+  const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Track when both data channel and shared secret are ready
-  const [readyToTransfer, setReadyToTransfer] = useState(false);
-
-  // Effect: when readyToTransfer is true, start transfer
+  // Initialize mounted state and offline detection
   useEffect(() => {
-    if (readyToTransfer && filesRef.current.length > 0) {
-      startTransfer(filesRef.current);
-      setReadyToTransfer(false); // reset after starting
+    isMountedRef.current = true;
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
+      setIsOffline(!navigator.onLine);
     }
-  }, [readyToTransfer]);
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Listen for online/offline events
   useEffect(() => {
-    const handleOnline = () => setIsOffline(false);
-    const handleOffline = () => setIsOffline(true);
+    const handleOnline = () => { if (isMountedRef.current) setIsOffline(false); };
+    const handleOffline = () => { if (isMountedRef.current) setIsOffline(true); };
+    
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      // Inform peer of cancel on unmount if connected
-      if (signalingRef.current && signalingRef.current.isConnected()) {
-        signalingRef.current.send({ type: 'session-cancel' });
+      
+      // CRITICAL FIX: Only cleanup if transfer not complete
+      if (!filesSuccessfullySentRef.current && !transferCompleteRef.current) {
+        if (signalingRef.current?.isConnected()) {
+          try {
+            signalingRef.current.send({ type: 'session-cancel' });
+          } catch (err) {
+            console.warn('[SendPage] Failed to send cancel on unmount:', err);
+          }
+        }
+        transferRef.current?.cancel();
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
       }
-      transferRef.current?.cancel();
-      rtcRef.current?.close();
-      signalingRef.current?.disconnect();
+      
+      // Clear handshake timeout
+      if (handshakeTimeoutRef.current) {
+        clearTimeout(handshakeTimeoutRef.current);
+      }
     };
+  }, []);
+
+  // CRITICAL FIX: Better peer disconnect handler
+  const handlePeerDisconnect = useCallback(() => {
+    console.warn('[SendPage] Peer disconnected');
+    if (!isMountedRef.current) return;
+
+    // CRITICAL: If files already sent successfully, just show info message
+    if (transferCompleteRef.current || filesSuccessfullySentRef.current || stepRef.current === 'complete') {
+      setError('Receiver disconnected. Your files were sent successfully.');
+      return;
+    }
+
+    // Only reset if transfer was incomplete
+    setError('Receiver disconnected during transfer. Please try again or resend files.');
+    setResumeAvailable(true);
+  }, []);
+
+  // Manual resume handler
+  const handleResume = async () => {
+    if (!isMountedRef.current) return;
+    setResumeInProgress(true);
+    setError('');
+    
+    try {
+      if (!signalingRef.current || !rtcRef.current || !transferRef.current) {
+        if (isMountedRef.current) {
+          setError('Cannot resume: connection not initialized.');
+          setResumeInProgress(false);
+        }
+        return;
+      }
+      
+      await signalingRef.current.connect();
+      await rtcRef.current.initialize('sender');
+      
+      if (typeof (transferRef.current as any).handleResumeRequest === 'function') {
+        const unsent = (transferRef.current as any).sentChunkBitmap
+          ? (transferRef.current as any).sentChunkBitmap.map((sent: boolean, idx: number) => sent ? null : idx).filter((v: number | null) => v !== null)
+          : [];
+        if (unsent.length > 0) {
+          await (transferRef.current as any).handleResumeRequest(unsent);
+        }
+      }
+      
+      if (isMountedRef.current) {
+        setResumeInProgress(false);
+        setResumeAvailable(false);
+      }
+    } catch (err) {
+      if (isMountedRef.current) {
+        setError('Resume failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        setResumeInProgress(false);
+      }
+    }
+  };
+
+  // CRITICAL FIX: Check and start transfer when conditions are met
+  const checkAndStartTransfer = useCallback(() => {
+    if (dataChannelReadyRef.current && 
+        sharedSecretRef.current && 
+        filesRef.current.length > 0 &&
+        !transferStartedRef.current) {
+      console.log('[SendPage] All conditions met, starting transfer');
+      transferStartedRef.current = true;
+      startTransfer(filesRef.current);
+    }
   }, []);
 
   const handleFiles = (selectedFiles: File[]) => {
     if (selectedFiles.length === 0) return;
-    // Sort new files
+    
     const sortedFiles = [...selectedFiles].sort((a, b) => {
       const aPath = (a as any).webkitRelativePath || a.name;
       const bPath = (b as any).webkitRelativePath || b.name;
       return aPath.localeCompare(bPath);
     });
 
-    // If sendAsZip is checked and we're adding multiple files or folders
     if (sendAsZip && sortedFiles.length > 0 && (sortedFiles.length > 1 || (sortedFiles[0] as any).webkitRelativePath)) {
       import('jszip').then(JSZipModule => {
         const JSZip = JSZipModule.default;
         const zip = new JSZip();
-        // Combine existing files + new files
         const allFiles = [...filesRef.current, ...sortedFiles];
         allFiles.forEach(f => {
           const relPath = (f as any).webkitRelativePath || f.name;
@@ -142,9 +224,7 @@ export default function SendPage() {
       return;
     }
 
-    // ADD to existing files instead of replacing
     const updatedFiles = [...filesRef.current, ...sortedFiles];
-    // Remove duplicates based on name and size
     const uniqueFiles = updatedFiles.filter((file, index, self) =>
       index === self.findIndex(f => f.name === file.name && f.size === file.size)
     );
@@ -156,7 +236,6 @@ export default function SendPage() {
     setReadyToSend(true);
   };
 
-  // Remove a single file by index
   const removeFile = (index: number) => {
     const updatedFiles = files.filter((_, idx) => idx !== index);
     setFiles(updatedFiles);
@@ -169,7 +248,6 @@ export default function SendPage() {
     }
   };
 
-  // Remove all files
   const removeAllFiles = () => {
     setFiles([]);
     filesRef.current = [];
@@ -182,15 +260,14 @@ export default function SendPage() {
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files ? Array.from(event.target.files) : [];
-    // ...existing code...
     handleFiles(selectedFiles);
   };
 
-  // Drag & drop handlers
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragActive(false);
     let droppedFiles: File[] = [];
+    
     const traverseFileTree = (item: any, path = "") => {
       return new Promise<File[]>((resolve) => {
         if (item.isFile) {
@@ -223,12 +300,10 @@ export default function SendPage() {
         return [];
       })).then((results) => {
         droppedFiles = results.flat();
-        // ...existing code...
         handleFiles(droppedFiles);
       });
     } else {
       droppedFiles = Array.from(event.dataTransfer.files);
-      // ...existing code...
       handleFiles(droppedFiles);
     }
   };
@@ -243,64 +318,62 @@ export default function SendPage() {
     setIsDragActive(false);
   };
 
-  // Manual resume handler (move to component scope)
-  const handleResume = async () => {
-    setResumeInProgress(true);
-    setError('');
-    // Try to reconnect and resend missing chunks
-    try {
-      if (!signalingRef.current || !rtcRef.current || !transferRef.current) {
-        setError('Cannot resume: connection not initialized.');
-        setResumeInProgress(false);
-        return;
-      }
-      await signalingRef.current.connect();
-      await rtcRef.current.initialize('sender');
-      // Resend missing chunks if any
-      if (typeof (transferRef.current as any).handleResumeRequest === 'function') {
-        // For demo, just call with all unsent chunks
-        const unsent = (transferRef.current as any).sentChunkBitmap
-          ? (transferRef.current as any).sentChunkBitmap.map((sent: boolean, idx: number) => sent ? null : idx).filter((v: number | null) => v !== null)
-          : [];
-        if (unsent.length > 0) {
-          await (transferRef.current as any).handleResumeRequest(unsent);
-        }
-      }
-      setResumeInProgress(false);
-      setResumeAvailable(false);
-    } catch (err) {
-      setError('Resume failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
-      setResumeInProgress(false);
+  const handleSend = () => {
+    if (!filesRef.current.length) {
+      setError('Please select at least one file or folder to send.');
+      setStep('select');
+      return;
     }
+    setError('');
+    setStep('waiting');
+    setProgressList(new Array(filesRef.current.length).fill(0));
+    setSpeedList(new Array(filesRef.current.length).fill(0));
+    setTimeRemainingList(new Array(filesRef.current.length).fill(0));
+    setErrorLog([]);
+    dataChannelReadyRef.current = false;
+    transferStartedRef.current = false;
+    transferCompleteRef.current = false;
+    filesSuccessfullySentRef.current = false;
+    setReadyToSend(false);
+    initializeConnection();
   };
 
   const initializeConnection = async () => {
     try {
-      // Connect to signaling server
       const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || 'ws://localhost:3001';
       const signaling = new SignalingClient(signalingUrl);
       signalingRef.current = signaling;
 
       await signaling.connect();
 
-      // Initialize WebRTC
       const rtc = new RTCConnection({
         onStateChange: (state) => {
+          if (!isMountedRef.current) return;
+          
           if (state === 'connected') {
             setStep('connected');
           } else if (state === 'failed') {
-            setError('Connection failed. Please try again.');
+            // CRITICAL FIX: Don't show error if transfer complete
+            if (!transferCompleteRef.current && !filesSuccessfullySentRef.current) {
+              setError('Connection failed. Please try again.');
+            }
           }
         },
         onDataChannelOpen: () => {
+          console.log('[SendPage] Data channel opened');
           dataChannelReadyRef.current = true;
-          if (filesRef.current.length > 0 && sharedSecretRef.current) {
-            setReadyToTransfer(true);
-          }
+          checkAndStartTransfer();
         },
         onError: (err) => {
+          if (!isMountedRef.current) return;
+          
+          // CRITICAL FIX: Don't show errors if transfer complete
+          if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
+            console.log('[SendPage] Ignoring error after transfer complete:', err);
+            return;
+          }
+          
           setError(err.message);
-          // If error is a data channel or connection error, show resume option
           if (err.message && (err.message.includes('data channel') || err.message.includes('Connection failed'))) {
             setResumeAvailable(true);
             setResumeInProgress(false);
@@ -309,43 +382,63 @@ export default function SendPage() {
       });
       rtcRef.current = rtc;
 
-      // Patch: If you want to listen for connection stats, add a public event or polling in RTCConnection and update here.
-
       await rtc.initialize('sender');
 
-      // Handle signaling messages
       signaling.on('session-created', (message) => {
-        setSessionCode(message.code);
+        if (isMountedRef.current) {
+          setSessionCode(message.code);
+        }
       });
 
-
       signaling.on('peer-joined', async () => {
+        if (!isMountedRef.current) return;
+        
+        console.log('[SendPage] Peer joined');
         setStep('connected');
-        // ECDH: generate key pair and send public key
+        
+        // CRITICAL FIX: Clear any existing handshake timeout
+        if (handshakeTimeoutRef.current) {
+          clearTimeout(handshakeTimeoutRef.current);
+        }
+        
+        // CRITICAL FIX: Set handshake timeout
+        handshakeTimeoutRef.current = setTimeout(() => {
+          if (!sharedSecretRef.current && isMountedRef.current) {
+            setError('Handshake timeout. Please try again.');
+            reset();
+          }
+        }, 10000); // 10 second timeout
+        
         const keyPair = await generateECDHKeyPair();
         ecdhKeyPairRef.current = keyPair;
         const exported = await exportPublicKey(keyPair.publicKey);
         const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
         signaling.sendPublicKey(pubKeyB64);
-        // Ensure data channel is created before offer
+        
         await rtc.createDataChannel();
-        // Create and send offer
         const offer = await rtc.createOffer();
         signaling.sendOffer(offer.sdp!);
       });
 
       signaling.on('public-key', async (message) => {
-        // Receive peer's public key, import, and derive shared secret
+        if (!isMountedRef.current) return;
+        
+        console.log('[SendPage] Received peer public key');
         const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
         const peerKey = await importPublicKey(raw.buffer);
         peerPublicKeyRef.current = peerKey;
+        
         if (ecdhKeyPairRef.current) {
           sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
           console.log('[SendPage] Shared secret derived');
-          // Only start transfer if files are selected and data channel is ready
-          if (filesRef.current.length > 0 && dataChannelReadyRef.current) {
-            setReadyToTransfer(true);
+          
+          // CRITICAL FIX: Clear handshake timeout on success
+          if (handshakeTimeoutRef.current) {
+            clearTimeout(handshakeTimeoutRef.current);
+            handshakeTimeoutRef.current = null;
           }
+          
+          checkAndStartTransfer();
         }
       });
 
@@ -358,53 +451,48 @@ export default function SendPage() {
       });
 
       signaling.on('error', (message) => {
-        // ...existing code...
+        if (!isMountedRef.current) return;
+        
+        // CRITICAL FIX: Don't reset if transfer complete
+        if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
+          setError('Connection error, but your files were sent successfully.');
+          return;
+        }
+        
         setError(message.error);
       });
 
-      signaling.on('peer-disconnected', () => {
-        setError('Receiver disconnected. Please try again or resend files.');
-        setStep('select');
-        transferRef.current?.cancel();
-        rtcRef.current?.close();
-        signalingRef.current?.disconnect();
-      });
-      // Listen for session-cancel and session-reset from peer
-      signaling.on('session-cancel', () => {
-        setError('Receiver cancelled the session. Please start a new transfer.');
-        setStep('select');
-        transferRef.current?.cancel();
-        rtcRef.current?.close();
-        signalingRef.current?.disconnect();
-      });
-      signaling.on('session-reset', () => {
-        setError('Receiver reset the session. Please start a new transfer.');
-        setStep('select');
-        transferRef.current?.cancel();
-        rtcRef.current?.close();
-        signalingRef.current?.disconnect();
-      });
+      // CRITICAL FIX: Better disconnect handlers
+      signaling.on('peer-disconnected', handlePeerDisconnect);
+      signaling.on('session-cancel', handlePeerDisconnect);
+      signaling.on('session-reset', handlePeerDisconnect);
 
-      // Handle ICE candidates
       rtc.onIceCandidate = (candidate) => {
         signaling.sendIceCandidate(candidate);
       };
 
-      // Create session
       signaling.createSession();
     } catch (err) {
+      if (!isMountedRef.current) return;
+      
+      if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
+        setError('Connection error, but your files were sent successfully.');
+        return;
+      }
+      
       setError(err instanceof Error ? err.message : 'Failed to initialize connection');
     }
   };
 
-  // Multi-file batch transfer using new protocol
   const startTransfer = async (selectedFiles: File[]) => {
     if (!selectedFiles.length) {
       setError('No files selected. Please select at least one file or folder to send.');
       setStep('select');
       return;
     }
-    console.log('[SendPage][DEBUG] startTransfer called', { selectedFiles, rtcRef: rtcRef.current });
+    
+    console.log('[SendPage] startTransfer called', { selectedFiles, rtcRef: rtcRef.current });
+    
     if (!rtcRef.current) {
       setError('Connection not established. Please try again.');
       setStep('select');
@@ -413,10 +501,10 @@ export default function SendPage() {
 
     if (!sharedSecretRef.current) {
       setError('Encryption handshake not complete. Please wait for the connection to establish before sending files.');
-      // ...existing code...
       return;
     }
-    // Calculate debug info for each file before transfer
+    
+    // Calculate debug info for each file
     Promise.all(selectedFiles.map(async (file) => {
       const arrayBuffer = await file.arrayBuffer();
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
@@ -428,19 +516,27 @@ export default function SendPage() {
         size: file.size,
         hex
       };
-    })).then(setFileDebugInfo);
-    setStep('transferring');
+    })).then(info => {
+      if (isMountedRef.current) setFileDebugInfo(info);
+    });
+    
+    if (isMountedRef.current) setStep('transferring');
+    
     const transfer = new FileTransferSender(
       (data) => {
-        console.log('[SendPage][DEBUG] rtc.send called, bytes:', data.byteLength);
+        console.log('[SendPage] rtc.send called, bytes:', data.byteLength);
         return rtcRef.current!.send(data);
       },
       () => rtcRef.current!.getBufferedAmount(),
       () => rtcRef.current!.getDataChannelState()
     );
+    
     transfer.setEncryptionKey(sharedSecretRef.current);
     transferRef.current = transfer;
+    
     transfer.onProgress = (prog) => {
+      if (!isMountedRef.current) return;
+      
       const fileIdx = transfer.fileIndex;
       setProgressList((prev) => {
         const updated = [...prev];
@@ -458,33 +554,54 @@ export default function SendPage() {
         return updated;
       });
     };
+    
     transfer.onComplete = () => {
-        console.log('[SendPage][DEBUG] transfer.onComplete called');
+      console.log('[SendPage] transfer.onComplete called');
+      
+      if (!isMountedRef.current) return;
+      
+      // CRITICAL FIX: Mark transfer as complete
+      transferCompleteRef.current = true;
+      filesSuccessfullySentRef.current = true;
+      
       setProgressList((prev) => prev.map(() => 100));
       setStep('complete');
+      
       // Clear keys after transfer
       ecdhKeyPairRef.current = null;
       peerPublicKeyRef.current = null;
       sharedSecretRef.current = null;
     };
+    
     transfer.onError = (err) => {
-        console.log('[SendPage][DEBUG] transfer.onError called', err);
+      console.log('[SendPage] transfer.onError called', err);
+      
+      if (!isMountedRef.current) return;
+      
+      // CRITICAL FIX: Don't show errors if transfer complete
+      if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
+        console.log('[SendPage] Ignoring error after transfer complete:', err);
+        return;
+      }
+      
       setError(err.message);
       setErrorLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${err.message}`]);
+      
       // Clear keys on error
       ecdhKeyPairRef.current = null;
       peerPublicKeyRef.current = null;
       sharedSecretRef.current = null;
     };
+    
     await transfer.startBatchTransfer(selectedFiles);
   };
 
-  const [copyStatus, setCopyStatus] = useState<'none' | 'code' | 'link'>('none');
   const copyCode = () => {
     navigator.clipboard.writeText(sessionCode);
     setCopyStatus('code');
     setTimeout(() => setCopyStatus('none'), 2000);
   };
+
   const copyLink = () => {
     const url = `${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`;
     navigator.clipboard.writeText(url);
@@ -493,19 +610,43 @@ export default function SendPage() {
   };
 
   const reset = () => {
-    // Inform peer of reset if connected
-    if (signalingRef.current && signalingRef.current.isConnected()) {
-      signalingRef.current.send({ type: 'session-reset' });
+    // CRITICAL FIX: Prevent duplicate resets
+    if (isResettingRef.current) return;
+    isResettingRef.current = true;
+    
+    // Clear handshake timeout
+    if (handshakeTimeoutRef.current) {
+      clearTimeout(handshakeTimeoutRef.current);
+      handshakeTimeoutRef.current = null;
     }
-    transferRef.current?.cancel();
-    rtcRef.current?.close();
-    signalingRef.current?.disconnect();
-    // Reset all refs to initial state
+    
+    // Inform peer only if still connected
+    if (signalingRef.current?.isConnected()) {
+      try {
+        signalingRef.current.send({ type: 'session-reset' });
+      } catch (err) {
+        console.warn('[SendPage] Failed to send reset signal:', err);
+      }
+    }
+    
+    // Only close connections if transfer complete or not started
+    if (transferCompleteRef.current || !transferStartedRef.current) {
+      transferRef.current?.cancel();
+      rtcRef.current?.close();
+      signalingRef.current?.disconnect();
+    }
+    
+    // Reset all refs
     dataChannelReadyRef.current = false;
     filesRef.current = [];
     transferRef.current = null;
     rtcRef.current = null;
     signalingRef.current = null;
+    transferStartedRef.current = false;
+    transferCompleteRef.current = false;
+    filesSuccessfullySentRef.current = false;
+    
+    // Reset state
     setStep('select');
     setFiles([]);
     setSessionCode('');
@@ -515,16 +656,24 @@ export default function SendPage() {
     setError('');
     setErrorLog([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
+    
+    setTimeout(() => {
+      isResettingRef.current = false;
+    }, 100);
   };
 
-  // Retry logic: restart transfer with previous files
   const handleRetry = () => {
-    // Check if files are still selected
-    if (filesRef.current.length === 0 || files.length === 0) {
-      setError('No files selected. Please select files to continue.');
+    // CRITICAL FIX: Preserve file selection defensively
+    if (filesRef.current.length === 0 && files.length === 0) {
+      setError('No files to retry. Please select files first.');
       setStep('select');
       return;
     }
+    
+    if (filesRef.current.length === 0 && files.length > 0) {
+      filesRef.current = [...files];
+    }
+    
     setError('');
     setStep('waiting');
     setProgressList(new Array(filesRef.current.length).fill(0));
@@ -532,24 +681,25 @@ export default function SendPage() {
     setTimeRemainingList(new Array(filesRef.current.length).fill(0));
     setErrorLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] Retrying transfer...`]);
     dataChannelReadyRef.current = false;
-    setReadyToTransfer(false);
+    transferStartedRef.current = false;
+    transferCompleteRef.current = false;
+    filesSuccessfullySentRef.current = false;
     initializeConnection();
-    // No need for setTimeout/startTransfer here; transfer will start when both ready
   };
 
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
-      {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900">
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
-          {/* Connection Quality/Type Indicator */}
           <div className="flex items-center gap-2">
             {isOffline ? (
-              <span className="text-red-600 font-semibold flex items-center gap-1"><Wifi className="w-4 h-4" />Offline</span>
+              <span className="text-red-600 font-semibold flex items-center gap-1">
+                <Wifi className="w-4 h-4" />Offline
+              </span>
             ) : connectionType ? (
               <span className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-200 text-gray-700 font-semibold flex items-center gap-1">
                 <Wifi className="w-4 h-4" />
@@ -566,19 +716,17 @@ export default function SendPage() {
 
       <main className="container mx-auto px-2 py-8 sm:px-4 sm:py-16">
         <div className="max-w-2xl mx-auto">
-          {/* Error Message and Retry Button */}
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
               <div>{error}</div>
-              {/* Only show retry button if files are still selected */}
-              {filesRef.current.length > 0 && files.length > 0 ? (
+              {filesRef.current.length > 0 && files.length > 0 && !transferCompleteRef.current && (
                 <button
                   onClick={handleRetry}
                   className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
                 >
                   Retry
                 </button>
-              ) : null}
+              )}
               {errorLog.length > 0 && (
                 <div className="mt-2 text-xs text-gray-500">
                   <div className="font-bold mb-1">Error Log:</div>
@@ -591,7 +739,7 @@ export default function SendPage() {
               )}
             </div>
           )}
-          {/* Resume Prompt */}
+
           {resumeAvailable && (
             <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
               <div className="font-semibold mb-2">Transfer interrupted</div>
@@ -606,7 +754,6 @@ export default function SendPage() {
             </div>
           )}
 
-          {/* Select Files with Drag & Drop */}
           {step === 'select' && (
             <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
               <div className="text-center mb-8">
@@ -616,7 +763,6 @@ export default function SendPage() {
                 <h2 className="text-3xl font-bold text-gray-900 mb-2">Send Files</h2>
                 <p className="text-gray-600">Choose one or more files or a folder to share instantly</p>
               </div>
-
 
               <div className="flex flex-col sm:flex-row gap-4 mb-4">
                 <div className="flex items-center gap-2 mb-2">
@@ -656,9 +802,7 @@ export default function SendPage() {
                     className="hidden"
                     ref={el => {
                       if (el) {
-                        // @ts-ignore
                         el.setAttribute('webkitdirectory', '');
-                        // @ts-ignore
                         el.setAttribute('directory', '');
                       }
                     }}
@@ -676,7 +820,6 @@ export default function SendPage() {
                   </button>
                 </label>
               </div>
-
 
               <div
                 className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors select-none ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50'} focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}
@@ -703,7 +846,6 @@ export default function SendPage() {
                 )}
               </div>
 
-              {/* Selected files preview */}
               {files.length > 0 && (
                 <>
                   <div className="mt-4 flex justify-between items-center mb-2">
@@ -724,7 +866,6 @@ export default function SendPage() {
                       const isAudio = f.type.startsWith('audio/');
                       return (
                         <div key={f.name + f.size + idx} className="bg-gray-50 rounded-lg p-4 flex flex-col items-center shadow relative">
-                          {/* Remove button for individual file */}
                           <button
                             onClick={() => removeFile(idx)}
                             className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600 transition text-xs font-bold"
@@ -772,7 +913,6 @@ export default function SendPage() {
             </div>
           )}
 
-          {/* Waiting for Receiver */}
           {step === 'waiting' && (
             <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 animate-fade-in">
               <div className="text-center mb-8">
@@ -783,7 +923,6 @@ export default function SendPage() {
                 <p className="text-gray-600 animate-fade-in">Waiting for receiver to join...</p>
               </div>
 
-              {/* File Info */}
               {files.length > 0 && (
                 <div className="bg-gray-50 rounded-lg p-4 mb-6 animate-fade-in">
                   <p className="text-sm text-gray-500 mb-1">Selected files:</p>
@@ -798,9 +937,6 @@ export default function SendPage() {
                 </div>
               )}
 
-
-              {/* Session Code & QR */}
-
               <div className="bg-blue-50 rounded-xl p-4 sm:p-6 mb-6 animate-fade-in flex flex-col items-center w-full max-w-xs sm:max-w-md mx-auto">
                 <p className="text-sm text-gray-600 mb-2 text-center">Transfer Code</p>
                 <div className="text-5xl sm:text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 animate-fade-in select-all">
@@ -810,9 +946,15 @@ export default function SendPage() {
                   <>
                     <div className="mb-4 flex flex-col items-center w-full">
                       <div className="w-full flex justify-center">
-                        <QRCode value={`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`} size={typeof window !== 'undefined' && window.innerWidth < 400 ? 180 : 220} style={{ width: '100%', height: 'auto', maxWidth: 220, minWidth: 120 }} />
+                        <QRCode 
+                          value={`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`} 
+                          size={typeof window !== 'undefined' && window.innerWidth < 400 ? 180 : 220} 
+                          style={{ width: '100%', height: 'auto', maxWidth: 220, minWidth: 120 }} 
+                        />
                       </div>
-                      <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">{`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`}</div>
+                      <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">
+                        {`${typeof window !== 'undefined' ? window.location.origin : ''}/receive?code=${sessionCode}`}
+                      </div>
                     </div>
                     <div className='flex flex-col sm:flex-row m-4 w-full'>
                       <button
@@ -833,7 +975,7 @@ export default function SendPage() {
                           </>
                         )}
                       </button>
-                        </div>
+                    </div>
                     <div className="flex flex-col sm:flex-row gap-2 w-full">
                       <button
                         onClick={copyLink}
@@ -870,7 +1012,10 @@ export default function SendPage() {
                         style={{ minHeight: 48 }}
                         aria-label="Share Link"
                       >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 8a3 3 0 00-6 0v4a3 3 0 006 0V8z" /><path strokeLinecap="round" strokeLinejoin="round" d="M19 8v4a7 7 0 01-14 0V8" /></svg>
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 8a3 3 0 00-6 0v4a3 3 0 006 0V8z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 8v4a7 7 0 01-14 0V8" />
+                        </svg>
                         Share Link
                       </button>
                     </div>
@@ -884,7 +1029,6 @@ export default function SendPage() {
             </div>
           )}
 
-          {/* Connected */}
           {step === 'connected' && (
             <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
               <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -895,7 +1039,6 @@ export default function SendPage() {
             </div>
           )}
 
-          {/* Transferring */}
           {step === 'transferring' && (
             <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
               <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">Sending Files</h2>
@@ -909,7 +1052,6 @@ export default function SendPage() {
                           <span className="font-semibold text-gray-900 break-all">{f.name}</span>
                           <span className="text-sm text-gray-600 mt-1 sm:mt-0">{formatBytes(f.size)}</span>
                         </div>
-                        {/* Progress Bar for each file */}
                         <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
                           <div
                             className="h-full bg-blue-600 transition-all duration-300"
@@ -929,7 +1071,6 @@ export default function SendPage() {
             </div>
           )}
 
-          {/* Complete */}
           {step === 'complete' && (
             <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
               <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">

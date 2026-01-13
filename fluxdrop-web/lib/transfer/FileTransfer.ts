@@ -36,6 +36,7 @@ interface ChunkMessage {
 }
 
 export class FileTransferSender {
+  public onFileComplete?: (fileIndex: number) => void;
                           /**
                            * Debug: log current state before starting batch transfer
                            */
@@ -382,6 +383,9 @@ export class FileTransferSender {
     }
 
     if (this.currentChunk >= this.chunks.length) {
+      if (typeof this.onFileComplete === 'function') {
+        this.onFileComplete(this._fileIndex);
+      }
       this.sendMessage({ type: 'complete' });
       this._fileIndex++;
       await this.startNextFile();
@@ -489,21 +493,20 @@ export class FileTransferSender {
     }
   }
 
+  // FIX 1: Proper sendMessage with endianness handling
   private sendMessage(message: ChunkMessage) {
-    // Check if data channel is open before sending
     if (this.getDataChannelState && this.getDataChannelState() !== 'open') {
       const msg = 'Connection lost. Retrying chunk send...';
       this.logError(msg);
       this.onUserError?.(msg);
-      // Increment retry count for current chunk
       if (typeof this.currentChunk === 'number') {
         this.chunkRetryCounts[this.currentChunk] = (this.chunkRetryCounts[this.currentChunk] || 0) + 1;
       }
       setTimeout(() => this.sendNextChunk(), 500);
       return;
     }
+
     const encoder = new TextEncoder();
-    // Build header with all relevant fields
     const headerObj: any = {
       type: message.type,
       metadata: message.metadata,
@@ -514,25 +517,32 @@ export class FileTransferSender {
     if (message.batchMetadata) headerObj.batchMetadata = message.batchMetadata;
 
     const json = JSON.stringify(headerObj);
-    // Send header
     const header = encoder.encode(json);
-    const headerLength = new Uint32Array([header.length]);
+    
+    // FIX: Use DataView for proper endianness (little-endian)
+    const headerLengthBuffer = new ArrayBuffer(4);
+    const headerLengthView = new DataView(headerLengthBuffer);
+    headerLengthView.setUint32(0, header.length, true); // true = little-endian
 
     if (message.data) {
-      // Send: [header length (4 bytes)][header][data]
-      const combined = new Uint8Array(4 + header.length + message.data.byteLength);
-      combined.set(new Uint8Array(headerLength.buffer), 0);
+      // FIX: Ensure we're working with actual data, not views
+      const dataBytes = new Uint8Array(message.data);
+      const totalSize = 4 + header.length + dataBytes.byteLength;
+      
+      // Create combined buffer
+      const combined = new Uint8Array(totalSize);
+      combined.set(new Uint8Array(headerLengthBuffer), 0);
       combined.set(header, 4);
-      combined.set(new Uint8Array(message.data), 4 + header.length);
+      combined.set(dataBytes, 4 + header.length);
+      
       const result = this.sendData(combined);
-      console.log(`[FileTransferSender] Sent chunk ${message.chunkIndex}, type=${message.type}, bytes=${combined.length}, sendData returned:`, result);
+      console.log(`[FileTransferSender] Sent chunk ${message.chunkIndex}, type=${message.type}, bytes=${totalSize}, sendData returned:`, result);
     } else {
-      // Send: [header length (4 bytes)][header]
       const combined = new Uint8Array(4 + header.length);
-      combined.set(new Uint8Array(headerLength.buffer), 0);
+      combined.set(new Uint8Array(headerLengthBuffer), 0);
       combined.set(header, 4);
       const result = this.sendData(combined);
-      console.log(`[FileTransferSender] Sent message type=${message.type}, bytes=${combined.length}, sendData returned:`, result);
+      console.log(`[FileTransferSender] Sent message type=${message.type}, bytes=${combined.byteLength}, sendData returned:`, result);
     }
   }
 

@@ -239,16 +239,23 @@ export class RTCConnection {
     }
 
     try {
-      // RTCDataChannel.send accepts ArrayBuffer, string, or Blob
       if (data instanceof ArrayBuffer) {
+        // Send ArrayBuffer directly
         this.dataChannel.send(data);
         console.log('[RTCConnection] Sent ArrayBuffer, bytes:', data.byteLength);
       } else if (data instanceof Uint8Array) {
-        // Copy only the relevant bytes into a new ArrayBuffer
-        const arr = new Uint8Array(data.byteLength);
-        arr.set(data);
-        this.dataChannel.send(arr.buffer);
-        console.log('[RTCConnection] Sent Uint8Array, bytes:', arr.byteLength);
+        // Handle TypedArray views correctly
+        let bufferToSend: ArrayBuffer;
+        if (data.byteOffset !== 0 || data.byteLength !== data.buffer.byteLength || !(data.buffer instanceof ArrayBuffer)) {
+          // This is a view/slice or not an ArrayBuffer - copy to a new ArrayBuffer
+          const copy = new Uint8Array(data.byteLength);
+          copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+          bufferToSend = copy.buffer;
+        } else {
+          bufferToSend = data.buffer as ArrayBuffer;
+        }
+        this.dataChannel.send(bufferToSend);
+        console.log('[RTCConnection] Sent Uint8Array as ArrayBuffer, bytes:', data.byteLength);
       } else {
         const err = new Error('Unsupported data type for send');
         console.error('❌ Send failed:', err);

@@ -70,18 +70,22 @@ wss.on('connection', (ws: WebSocket, req) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', async () => {
     const client = clients.get(ws);
-    if (client?.sessionCode) {
-      sessionManager.removeClient(client.sessionCode, client.role!);
-      
-      // Notify the other peer
+    if (client?.sessionCode && client.role) {
       const session = sessionManager.getSession(client.sessionCode);
+      // Remove from session manager first
+      await sessionManager.removeClient(client.sessionCode, client.role);
+      // Then notify and close the other peer if exists
       if (session) {
         const otherRole = client.role === 'sender' ? 'receiver' : 'sender';
         const otherClient = session[otherRole];
-        if (otherClient) {
+        if (otherClient && otherClient.readyState === WebSocket.OPEN) {
           send(otherClient, { type: 'peer-disconnected' });
+          // If sender disconnected, close receiver too
+          if (client.role === 'sender') {
+            otherClient.close(1000, 'Sender disconnected');
+          }
         }
       }
     }
@@ -120,42 +124,38 @@ async function handleMessage(ws: WebSocket, message: SignalingMessage) {
 }
 
 async function handleCreateSession(ws: WebSocket, client: ClientConnection) {
-  const code = sessionManager.generateCode();
-  const session = sessionManager.createSession(code, ws);
-  
+  const code = await sessionManager.generateCode();
+  const session = await sessionManager.createSession(code, ws); // ADD await
   client.sessionCode = code;
   client.role = 'sender';
-  
   send(ws, {
     type: 'session-created',
     code,
     expiresIn: 300 // 5 minutes
   });
-  
   console.log(`📝 Session created: ${code}`);
 }
 
 async function handleJoinSession(ws: WebSocket, client: ClientConnection, code: string) {
   const session = sessionManager.getSession(code);
-  
   if (!session) {
     sendError(ws, 'Session not found or expired');
     return;
   }
-  
   if (session.receiver) {
     sendError(ws, 'Session already has a receiver');
     return;
   }
-  
-  sessionManager.addReceiver(code, ws);
+  const added = await sessionManager.addReceiver(code, ws); // ADD await and check result
+  if (!added) {
+    sendError(ws, 'Failed to join session');
+    return;
+  }
   client.sessionCode = code;
   client.role = 'receiver';
-  
   // Notify both parties
   send(ws, { type: 'session-joined', code });
   send(session.sender, { type: 'peer-joined' });
-  
   console.log(`🤝 Receiver joined session: ${code}`);
 }
 
@@ -194,12 +194,43 @@ function sendError(ws: WebSocket, error: string) {
 }
 
 // Cleanup expired sessions every minute
-setInterval(() => {
-  const cleaned = sessionManager.cleanupExpired();
+setInterval(async () => {
+  const cleaned = await sessionManager.cleanupExpired(); // Move await here
   if (cleaned > 0) {
     console.log(`🧹 Cleaned up ${cleaned} expired sessions`);
   }
 }, 60000);
+// Graceful shutdown handlers
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  // Close all WebSocket connections
+  for (const [ws, client] of clients.entries()) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1000, 'Server shutting down');
+    }
+  }
+  // Shutdown session manager (closes Redis)
+  await sessionManager.shutdown();
+  // Close WebSocket server
+  wss.close(() => {
+    console.log('✅ WebSocket server closed');
+  });
+  // Close HTTP server
+  server.close(() => {
+    console.log('✅ HTTP server closed');
+    process.exit(0);
+  });
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.error('⚠️ Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+});
+
+process.on('SIGINT', async () => {
+  console.log('\n🛑 SIGINT received, shutting down gracefully...');
+  process.emit('SIGTERM');
+});
 
 server.listen(PORT, () => {
   console.log(`🚀 FluxDrop Signaling Server running on port ${PORT}`);

@@ -1,11 +1,11 @@
-// fluxdrop-web/app/receive/page.tsx
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-
-import { useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import dynamic from 'next/dynamic';
-const QRScanner = dynamic(() => import('./QRScanner'), { ssr: false, loading: () => <div className="w-full h-40 flex items-center justify-center text-gray-400">Loading scanner…</div> });
+const QRScanner = dynamic(() => import('./QRScanner'), { 
+  ssr: false, 
+  loading: () => <div className="w-full h-40 flex items-center justify-center text-gray-400">Loading scanner…</div> 
+});
 
 import JSZip from 'jszip';
 import { ArrowLeft, Download, Check } from 'lucide-react';
@@ -18,25 +18,11 @@ import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecr
 type Step = 'enter-code' | 'connecting' | 'receiving' | 'complete';
 
 export default function ReceivePage() {
-  // Resume state
-  const [resumeAvailable, setResumeAvailable] = useState(false);
-  const [resumeInProgress, setResumeInProgress] = useState(false);
-  // Connection quality/type indicator state
-  const [connectionType, setConnectionType] = useState<string>('');
-  const [connectionQuality, setConnectionQuality] = useState<string>('');
-  const [isOffline, setIsOffline] = useState<boolean>(false);
-  useEffect(() => {
-    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
-      setIsOffline(!navigator.onLine);
-    }
-  }, []);
-  // ECDH state
-  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
-  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
-  const sharedSecretRef = useRef<CryptoKey | null>(null);
+  // State management
   const [step, setStep] = useState<Step>('enter-code');
   const stepRef = useRef<Step>('enter-code');
   useEffect(() => { stepRef.current = step; }, [step]);
+  
   const [code, setCode] = useState('');
   const [batchMetadata, setBatchMetadata] = useState<FileMetadata[]>([]);
   const [metadataList, setMetadataList] = useState<(FileMetadata | null)[]>([]);
@@ -45,60 +31,96 @@ export default function ReceivePage() {
   const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<(Blob | null)[]>([]);
   const [error, setError] = useState('');
-  // Add a handshake-in-progress state
   const [handshakeInProgress, setHandshakeInProgress] = useState(false);
-
-  // Add state to store file debug info
   const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
+  
+  // Connection state
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [resumeInProgress, setResumeInProgress] = useState(false);
+  const [connectionType, setConnectionType] = useState<string>('');
+  const [connectionQuality, setConnectionQuality] = useState<string>('');
+  const [isOffline, setIsOffline] = useState<boolean>(false);
 
+  // ECDH state
+  const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
+  const peerPublicKeyRef = useRef<CryptoKey | null>(null);
+  const sharedSecretRef = useRef<CryptoKey | null>(null);
+
+  // Refs
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferReceiver | null>(null);
   const fileIndexRef = useRef(0);
-  // Track if transfer is complete, for robust error suppression
+  
+  // CRITICAL FIX: Track if transfer completed successfully
   const transferCompleteRef = useRef(false);
-
-  // Track if component is mounted to prevent setState after unmount
+  const filesReadyForDownloadRef = useRef(false);
+  
+  // Track if component is mounted
   const isMountedRef = useRef(true);
+
+  // Initialize mounted state
   useEffect(() => {
     isMountedRef.current = true;
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
+      setIsOffline(!navigator.onLine);
+    }
     return () => {
       isMountedRef.current = false;
     };
   }, []);
 
-  // Listen for online/offline events
+  // Online/offline listeners
   useEffect(() => {
     const handleOnline = () => { if (isMountedRef.current) setIsOffline(false); };
     const handleOffline = () => { if (isMountedRef.current) setIsOffline(true); };
+    
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      // Inform peer of cancel on unmount if connected
-      if (signalingRef.current && signalingRef.current.isConnected()) {
-        signalingRef.current.send({ type: 'session-cancel' });
-      }
-      rtcRef.current?.close();
-      signalingRef.current?.disconnect();
     };
   }, []);
 
-
+  // Cleanup on unmount - ONLY if transfer not complete
   useEffect(() => {
     return () => {
-      rtcRef.current?.close();
-      signalingRef.current?.disconnect();
+      // CRITICAL FIX: Only cleanup if files are NOT ready for download
+      if (!filesReadyForDownloadRef.current) {
+        if (signalingRef.current?.isConnected()) {
+          signalingRef.current.send({ type: 'session-cancel' });
+        }
+        rtcRef.current?.close();
+        signalingRef.current?.disconnect();
+      }
     };
   }, []);
 
-  // Manual resume handler (move to component scope)
+  // CRITICAL FIX: Safe disconnect handler
+  const handlePeerDisconnect = useCallback(() => {
+    console.warn('[ReceivePage] Peer disconnected');
+    if (!isMountedRef.current) return;
+
+    // CRITICAL: If files are already received, just show warning
+    if (transferCompleteRef.current || filesReadyForDownloadRef.current || stepRef.current === 'complete') {
+      setError('Sender disconnected. Your files are safe and ready to download.');
+      // Don't reset the page or clear files!
+      return;
+    }
+
+    // Only reset if transfer was incomplete
+    setError('Sender disconnected during transfer. Please try again.');
+    setResumeAvailable(true);
+  }, []);
+
+  // Manual resume handler
   const handleResume = async () => {
     if (!isMountedRef.current) return;
     setResumeInProgress(true);
     setError('');
-    // Try to reconnect and request missing chunks
+    
     try {
       if (!signalingRef.current || !rtcRef.current || !transferRef.current) {
         if (isMountedRef.current) {
@@ -107,14 +129,15 @@ export default function ReceivePage() {
         }
         return;
       }
+      
       await signalingRef.current.connect();
       await rtcRef.current.initialize('receiver');
-      // Request missing chunks
+      
       transferRef.current.requestMissingChunks((msg) => {
-        // Send as ArrayBuffer
         const encoder = new TextEncoder();
         rtcRef.current?.send(encoder.encode(JSON.stringify(msg)));
       });
+      
       if (isMountedRef.current) {
         setResumeInProgress(false);
         setResumeAvailable(false);
@@ -127,15 +150,19 @@ export default function ReceivePage() {
     }
   };
 
-  const handleJoinSession = async () => {
-    if (code.length !== 6) {
+  // CONSOLIDATED: Single join session function
+  const handleJoinSession = async (joinCode?: string) => {
+    const sessionCode = joinCode || code;
+    
+    if (sessionCode.length !== 6) {
       setError('Please enter a 6-digit code');
       return;
     }
+
+    // Reset state
     setStep('connecting');
     setError('');
     setHandshakeInProgress(true);
-    // Always reset transfer state before joining session
     setBatchMetadata([]);
     setMetadataList([]);
     setProgressList([]);
@@ -144,9 +171,10 @@ export default function ReceivePage() {
     setReceivedFiles([]);
     setFileDebugInfo([]);
     fileIndexRef.current = 0;
+    transferCompleteRef.current = false;
+    filesReadyForDownloadRef.current = false;
 
     try {
-      // Connect to signaling server
       const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || 'ws://localhost:3001';
       const signaling = new SignalingClient(signalingUrl);
       signalingRef.current = signaling;
@@ -156,7 +184,7 @@ export default function ReceivePage() {
       // Initialize WebRTC
       const rtc = new RTCConnection({
         onStateChange: (state) => {
-          if (state === 'failed') {
+          if (state === 'failed' && !transferCompleteRef.current) {
             setError('Connection failed. Please try again.');
           }
         },
@@ -165,29 +193,16 @@ export default function ReceivePage() {
           transferRef.current?.handleMessage(data);
         },
         onError: (err) => {
-          // ...existing error logic...
-          if (typeof err === 'object' && err !== null) {
-            if ('name' in err) console.log('[ReceivePage][DEBUG] err.name:', (err as any).name);
-            if ('message' in err) console.log('[ReceivePage][DEBUG] err.message:', (err as any).message);
+          // CRITICAL FIX: Don't show errors if transfer is complete
+          if (transferCompleteRef.current || filesReadyForDownloadRef.current) {
+            console.log('[ReceivePage] Ignoring error after transfer complete:', err);
+            return;
           }
-          const isOpError = (e: unknown): e is { name: string; message?: string } =>
-            typeof e === 'object' && e !== null && 'name' in e && typeof (e as any).name === 'string';
-          let opError: { name: string; message?: string } | undefined = undefined;
-          if (typeof err === 'object' && err !== null && 'name' in err && (err as any).name === 'OperationError') {
-            opError = err as any;
-          }
-          if (err.message === 'Data channel error' || opError) {
-            if (stepRef.current === 'complete' || transferCompleteRef.current) {
-              if (opError && (opError.message?.includes('User-Initiated Abort') || opError.message?.includes('Close called'))) {
-                return;
-              }
-              if (isMountedRef.current) setError('Warning: Sender disconnected. You can still download your files.');
-            } else {
-              if (isMountedRef.current) {
-                setError('Connection lost. The sender has reset or closed the session. You may be able to resume the transfer.');
-                setResumeAvailable(true);
-                setResumeInProgress(false);
-              }
+
+          if (err.message === 'Data channel error') {
+            if (isMountedRef.current) {
+              setError('Connection lost. You may be able to resume the transfer.');
+              setResumeAvailable(true);
             }
           } else {
             if (isMountedRef.current) setError(err.message);
@@ -198,89 +213,86 @@ export default function ReceivePage() {
 
       await rtc.initialize('receiver');
 
-      // Defer FileTransferReceiver setup until shared secret is derived
-      let transfer: FileTransferReceiver | null = null;
+      // Setup transfer receiver after handshake
       const setupTransferReceiver = () => {
         if (!sharedSecretRef.current) {
-          setError('Encryption handshake not complete. Please wait for the connection to establish before receiving files.');
-          console.error('[ReceivePage] Cannot start receiving: shared secret not set.');
+          console.error('[ReceivePage] Cannot setup transfer: no shared secret');
           return;
         }
-        // Set up transfer and handlers synchronously before any messages can arrive
-        transfer = new FileTransferReceiver();
+
+        const transfer = new FileTransferReceiver();
         transfer.setDecryptionKey(sharedSecretRef.current);
         transferRef.current = transfer;
-        // Attach all handlers immediately
+
+        // Batch metadata handler
         transfer.onBatchMetadata = (batch) => {
           const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
-          console.log('[ReceivePage] onBatchMetadata called:', batch, files);
+          console.log('[ReceivePage] onBatchMetadata:', files);
+          
           if (!files) return;
-          setBatchMetadata((prev) => {
-            if (prev.length === 0) {
-              console.log('[ReceivePage] setBatchMetadata:', files);
-              return files;
-            } else {
-              return prev;
-            }
-          });
+
+          setBatchMetadata(files);
           setMetadataList(files.map(() => null));
           setProgressList(new Array(files.length).fill(0));
           setSpeedList(new Array(files.length).fill(0));
           setTimeRemainingList(new Array(files.length).fill(0));
           setReceivedFiles(new Array(files.length).fill(null));
-          fileIndexRef.current = 0 // Reset file index for new batch
+          fileIndexRef.current = 0;
         };
+
+        // Individual file metadata
         transfer.onMetadata = (meta: FileMetadata) => {
           setMetadataList((prev) => {
             const updated = [...prev];
-            // Find the index in batchMetadata that matches this meta
             let idx = batchMetadata.findIndex(
               (m) => m.name === meta.name && m.size === meta.size && m.type === meta.type
             );
-            // Fallback: first null slot
             if (idx === -1) idx = updated.findIndex((m) => m === null);
-            // Fallback: fileIndexRef
             if (idx === -1) idx = fileIndexRef.current;
             updated[idx] = meta;
             return updated;
           });
           setStep('receiving');
         };
+
+        // Progress updates
         transfer.onProgress = (prog: any) => {
+          const idx = fileIndexRef.current;
           setProgressList((prev) => {
             const updated = [...prev];
-            updated[fileIndexRef.current] = prog.percentage;
+            updated[idx] = prog.percentage;
             return updated;
           });
           setSpeedList((prev) => {
             const updated = [...prev];
-            updated[fileIndexRef.current] = prog.speed;
+            updated[idx] = prog.speed;
             return updated;
           });
           setTimeRemainingList((prev) => {
             const updated = [...prev];
-            updated[fileIndexRef.current] = prog.timeRemaining;
+            updated[idx] = prog.timeRemaining;
             return updated;
           });
         };
+
+        // File complete
         transfer.onComplete = async (file: Blob, completedFileIndex: number) => {
-          console.log(`[ReceivePage] onComplete called for fileIndex=${completedFileIndex}, blob.size=${file.size}`);
-          // Calculate SHA-256 and hex preview
+          console.log(`[ReceivePage] File ${completedFileIndex} complete, size: ${file.size}`);
+
+          // Calculate hash for debugging
           const arrayBuffer = await file.arrayBuffer();
           const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
           const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
-          const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+          const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16))
+            .map(b => b.toString(16).padStart(2, '0')).join(' ');
+
           setFileDebugInfo((prev) => {
             const updated = [...prev];
-            updated[completedFileIndex] = {
-              hash: hashB64,
-              type: file.type,
-              size: file.size,
-              hex
-            };
+            updated[completedFileIndex] = { hash: hashB64, type: file.type, size: file.size, hex };
             return updated;
           });
-          // Ensure metadataList is set for this file
+
+          // Ensure metadata is set
           setMetadataList((prev) => {
             const updated = [...prev];
             if (!updated[completedFileIndex] && batchMetadata[completedFileIndex]) {
@@ -288,460 +300,55 @@ export default function ReceivePage() {
             }
             return updated;
           });
+
+          // Add file to received files and check completion
           setReceivedFiles((prev) => {
             const updated = [...prev];
             updated[completedFileIndex] = file;
-            console.log('[ReceivePage] setReceivedFiles:', updated);
+
             const totalFiles = batchMetadata.length || 1;
             const receivedCount = updated.filter(Boolean).length;
-            console.log(`[ReceivePage] ReceivedCount=${receivedCount}, totalFiles=${totalFiles}`);
-            if (receivedCount >= totalFiles) {
-              console.log('[ReceivePage] All files received, setting step to complete');
+
+            console.log(`[ReceivePage] Received ${receivedCount}/${totalFiles} files`);
+
+            // CRITICAL FIX: Only mark as complete when ALL files received
+            if (receivedCount >= totalFiles && totalFiles > 0) {
+              console.log('[ReceivePage] All files received!');
               transferCompleteRef.current = true;
-              setStep('complete');
+              filesReadyForDownloadRef.current = true;
+              
+              // Use setTimeout to ensure state updates are processed
+              setTimeout(() => {
+                if (isMountedRef.current) {
+                  setStep('complete');
+                }
+              }, 100);
+              
+              // Clear encryption keys
               ecdhKeyPairRef.current = null;
               peerPublicKeyRef.current = null;
               sharedSecretRef.current = null;
+            } else {
+              // Still receiving files - stay in receiving state
+              console.log(`[ReceivePage] Still waiting for ${totalFiles - receivedCount} more files`);
             }
+
             return updated;
           });
+
           fileIndexRef.current++;
         };
+
+        // Transfer error
         transfer.onError = (err) => {
+          if (transferCompleteRef.current) return;
           if (isMountedRef.current) setError(err.message);
-          ecdhKeyPairRef.current = null;
-          peerPublicKeyRef.current = null;
-          sharedSecretRef.current = null;
         };
       };
-      // Wait for shared secret, then setup transfer receiver
-      const waitForSharedSecret = () => {
-        if (sharedSecretRef.current) {
-          setHandshakeInProgress(false);
-          // Set up transfer receiver synchronously before any messages can arrive
-          setupTransferReceiver();
-        } else {
-          setTimeout(waitForSharedSecret, 50);
-        }
-      };
-      waitForSharedSecret();
 
-      // Handle signaling messages
-
-      signaling.on('session-joined', async () => {
-        signaling.on('peer-disconnected', () => {
-          console.warn('[ReceivePage] Peer disconnected');
-          if (!isMountedRef.current) return;
-          if (step === 'complete') {
-            setError('Warning: Sender disconnected. You can still download your files.');
-          } else {
-            setError('Sender disconnected. Please try again or receive more files.');
-            setStep('enter-code');
-            rtcRef.current?.close();
-            signalingRef.current?.disconnect();
-            setBatchMetadata([]);
-            setMetadataList([]);
-            setProgressList([]);
-            setSpeedList([]);
-            setTimeRemainingList([]);
-            setReceivedFiles([]);
-            setHandshakeInProgress(false);
-            fileIndexRef.current = 0;
-          }
-        });
-        // Listen for session-cancel and session-reset from peer
-        signaling.on('session-cancel', () => {
-          if (!isMountedRef.current) return;
-          if (step === 'complete') {
-            setError('Warning: Sender cancelled the session. You can still download your files.');
-          } else {
-            setError('Sender cancelled the session. Please start a new transfer.');
-            setStep('enter-code');
-            rtcRef.current?.close();
-            signalingRef.current?.disconnect();
-            setBatchMetadata([]);
-            setMetadataList([]);
-            setProgressList([]);
-            setSpeedList([]);
-            setTimeRemainingList([]);
-            setReceivedFiles([]);
-            setHandshakeInProgress(false);
-            fileIndexRef.current = 0;
-          }
-        });
-        signaling.on('session-reset', () => {
-          if (!isMountedRef.current) return;
-          if (step === 'complete') {
-            setError('Warning: Sender reset the session. You can still download your files.');
-          } else {
-            setError('Sender reset the session. Please start a new transfer.');
-            setStep('enter-code');
-            rtcRef.current?.close();
-            signalingRef.current?.disconnect();
-            setBatchMetadata([]);
-            setMetadataList([]);
-            setProgressList([]);
-            setSpeedList([]);
-            setTimeRemainingList([]);
-            setReceivedFiles([]);
-            setHandshakeInProgress(false);
-            fileIndexRef.current = 0;
-          }
-        });
-        // ECDH: generate key pair and send public key
-        const keyPair = await generateECDHKeyPair();
-        ecdhKeyPairRef.current = keyPair;
-        const exported = await exportPublicKey(keyPair.publicKey);
-        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
-        signaling.sendPublicKey(pubKeyB64);
-        console.log('Joined session, public key sent');
-        setStep('receiving');
-      });
-
-      signaling.on('public-key', async (message) => {
-        // Receive peer's public key, import, and derive shared secret
-        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
-        const peerKey = await importPublicKey(raw.buffer);
-        peerPublicKeyRef.current = peerKey;
-        if (ecdhKeyPairRef.current) {
-          sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
-          console.log('[ReceivePage] Shared secret derived');
-        }
-      });
-
-      // Move offer/ice-candidate handlers here, after RTC is initialized
-      signaling.on('offer', async (message) => {
-        await rtc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
-        const answer = await rtc.createAnswer();
-        signaling.sendAnswer(answer.sdp!);
-      });
-
-      signaling.on('ice-candidate', async (message) => {
-        await rtc.addIceCandidate(message.candidate);
-      });
-
-      signaling.on('error', (message) => {
-        if (!isMountedRef.current) return;
-        if (step === 'complete') {
-          setError('Warning: Signaling error after transfer. You can still download your files.');
-        } else {
-          setError(message.error || 'Session not found or expired. Please check the code and try again.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
-          setBatchMetadata([]);
-          setMetadataList([]);
-          setProgressList([]);
-          setSpeedList([]);
-          setTimeRemainingList([]);
-          setReceivedFiles([]);
-          setHandshakeInProgress(false);
-          fileIndexRef.current = 0;
-        }
-      });
-
-      // Handle ICE candidates
-      rtc.onIceCandidate = (candidate) => {
-        signaling.sendIceCandidate(candidate);
-      };
-
-      // Join session
-      signaling.joinSession(code);
-    } catch (err) {
-      if (!isMountedRef.current) return;
-      if (step === 'complete') {
-        setError('Warning: Connection error after transfer. You can still download your files.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Failed to connect');
-        setStep('enter-code');
-        rtcRef.current?.close();
-        signalingRef.current?.disconnect();
-        setBatchMetadata([]);
-        setMetadataList([]);
-        setProgressList([]);
-        setSpeedList([]);
-        setTimeRemainingList([]);
-        setReceivedFiles([]);
-        setHandshakeInProgress(false);
-        fileIndexRef.current = 0;
-      }
-    }
-  };
-
-  // New function: handleJoinSessionWithCode
-  const handleJoinSessionWithCode = async (joinCode: string) => {
-    if (joinCode.length !== 6) {
-      setError('Please enter a 6-digit code');
-      return;
-    }
-    setStep('connecting');
-    setError('');
-    setHandshakeInProgress(true);
-    setBatchMetadata([]);
-    setMetadataList([]);
-    setProgressList([]);
-    setSpeedList([]);
-    setTimeRemainingList([]);
-    setReceivedFiles([]);
-    setFileDebugInfo([]);
-    fileIndexRef.current = 0;
-
-    try {
-      const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || 'ws://localhost:3001';
-      const signaling = new SignalingClient(signalingUrl);
-      signalingRef.current = signaling;
-
-      await signaling.connect();
-
-      const rtc = new RTCConnection({
-        onStateChange: (state) => {
-          if (state === 'failed') {
-            setError('Connection failed. Please try again.');
-          }
-        },
-        onDataChannelOpen: () => {},
-        onMessage: (data) => {
-          transferRef.current?.handleMessage(data);
-        },
-        onError: (err) => {
-          if (typeof err === 'object' && err !== null) {
-            if ('name' in err) console.log('[ReceivePage][DEBUG] err.name:', (err as any).name);
-            if ('message' in err) console.log('[ReceivePage][DEBUG] err.message:', (err as any).message);
-          }
-          const isOpError = (e: unknown): e is { name: string; message?: string } =>
-            typeof e === 'object' && e !== null && 'name' in e && typeof (e as any).name === 'string';
-          let opError: { name: string; message?: string } | undefined = undefined;
-          if (typeof err === 'object' && err !== null && 'name' in err && (err as any).name === 'OperationError') {
-            opError = err as any;
-          }
-          if (err.message === 'Data channel error' || opError) {
-            if (stepRef.current === 'complete' || transferCompleteRef.current) {
-              if (opError && (opError.message?.includes('User-Initiated Abort') || opError.message?.includes('Close called'))) {
-                return;
-              }
-              if (isMountedRef.current) setError('Warning: Sender disconnected. You can still download your files.');
-            } else {
-              if (isMountedRef.current) {
-                setError('Connection lost. The sender has reset or closed the session. You may be able to resume the transfer.');
-                setResumeAvailable(true);
-                setResumeInProgress(false);
-              }
-            }
-          } else {
-            if (isMountedRef.current) setError(err.message);
-          }
-        }
-      });
-      rtcRef.current = rtc;
-
-      await rtc.initialize('receiver');
-
-      // Register all signaling handlers BEFORE joinSession
-      signaling.on('session-joined', async () => {
-        const keyPair = await generateECDHKeyPair();
-        ecdhKeyPairRef.current = keyPair;
-        const exported = await exportPublicKey(keyPair.publicKey);
-        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
-        signaling.sendPublicKey(pubKeyB64);
-        console.log('Joined session, public key sent');
-        setStep('receiving');
-      });
-      signaling.on('peer-disconnected', () => {
-        console.warn('[ReceivePage] Peer disconnected');
-        if (!isMountedRef.current) return;
-        if (step === 'complete') {
-          setError('Warning: Sender disconnected. You can still download your files.');
-        } else {
-          setError('Sender disconnected. Please try again or receive more files.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
-          setBatchMetadata([]);
-          setMetadataList([]);
-          setProgressList([]);
-          setSpeedList([]);
-          setTimeRemainingList([]);
-          setReceivedFiles([]);
-          setHandshakeInProgress(false);
-          fileIndexRef.current = 0;
-        }
-      });
-      signaling.on('session-cancel', () => {
-        if (!isMountedRef.current) return;
-        if (step === 'complete') {
-          setError('Warning: Sender cancelled the session. You can still download your files.');
-        } else {
-          setError('Sender cancelled the session. Please start a new transfer.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
-          setBatchMetadata([]);
-          setMetadataList([]);
-          setProgressList([]);
-          setSpeedList([]);
-          setTimeRemainingList([]);
-          setReceivedFiles([]);
-          setHandshakeInProgress(false);
-          fileIndexRef.current = 0;
-        }
-      });
-      signaling.on('session-reset', () => {
-        if (!isMountedRef.current) return;
-        if (step === 'complete') {
-          setError('Warning: Sender reset the session. You can still download your files.');
-        } else {
-          setError('Sender reset the session. Please start a new transfer.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
-          setBatchMetadata([]);
-          setMetadataList([]);
-          setProgressList([]);
-          setSpeedList([]);
-          setTimeRemainingList([]);
-          setReceivedFiles([]);
-          setHandshakeInProgress(false);
-          fileIndexRef.current = 0;
-        }
-      });
-      signaling.on('public-key', async (message) => {
-        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
-        const peerKey = await importPublicKey(raw.buffer);
-        peerPublicKeyRef.current = peerKey;
-        if (ecdhKeyPairRef.current) {
-          sharedSecretRef.current = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, peerKey);
-          console.log('[ReceivePage] Shared secret derived');
-        }
-      });
-      signaling.on('offer', async (message) => {
-        await rtc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
-        const answer = await rtc.createAnswer();
-        signaling.sendAnswer(answer.sdp!);
-      });
-      signaling.on('ice-candidate', async (message) => {
-        await rtc.addIceCandidate(message.candidate);
-      });
-      signaling.on('error', (message) => {
-        if (!isMountedRef.current) return;
-        if (step === 'complete') {
-          setError('Warning: Signaling error after transfer. You can still download your files.');
-        } else {
-          setError(message.error || 'Session not found or expired. Please check the code and try again.');
-          setStep('enter-code');
-          rtcRef.current?.close();
-          signalingRef.current?.disconnect();
-          setBatchMetadata([]);
-          setMetadataList([]);
-          setProgressList([]);
-          setSpeedList([]);
-          setTimeRemainingList([]);
-          setReceivedFiles([]);
-          setHandshakeInProgress(false);
-          fileIndexRef.current = 0;
-        }
-      });
-      rtc.onIceCandidate = (candidate) => {
-        signaling.sendIceCandidate(candidate);
-      };
-
-      // Handshake polling with timeout
+      // Wait for shared secret with timeout
       let attempts = 0;
       const maxAttempts = 100; // 5 seconds
-      const setupTransferReceiver = () => {
-        if (!sharedSecretRef.current) {
-          setError('Encryption handshake not complete. Please wait for the connection to establish before receiving files.');
-          console.error('[ReceivePage] Cannot start receiving: shared secret not set.');
-          return;
-        }
-        let transfer = new FileTransferReceiver();
-        transfer.setDecryptionKey(sharedSecretRef.current);
-        transferRef.current = transfer;
-        transfer.onBatchMetadata = (batch) => {
-          const files = (batch as any)?.files || (batch as any)?.batchMetadata?.files;
-          if (!files) return;
-          setBatchMetadata((prev) => (prev.length === 0 ? files : prev));
-          setMetadataList(files.map(() => null));
-          setProgressList(new Array(files.length).fill(0));
-          setSpeedList(new Array(files.length).fill(0));
-          setTimeRemainingList(new Array(files.length).fill(0));
-          setReceivedFiles(new Array(files.length).fill(null));
-          fileIndexRef.current = 0;
-        };
-        transfer.onMetadata = (meta: FileMetadata) => {
-          setMetadataList((prev) => {
-            const updated = [...prev];
-            let idx = batchMetadata.findIndex(
-              (m) => m.name === meta.name && m.size === meta.size && m.type === meta.type
-            );
-            if (idx === -1) idx = updated.findIndex((m) => m === null);
-            if (idx === -1) idx = fileIndexRef.current;
-            updated[idx] = meta;
-            return updated;
-          });
-          setStep('receiving');
-        };
-        transfer.onProgress = (prog: any) => {
-          setProgressList((prev) => {
-            const updated = [...prev];
-            updated[fileIndexRef.current] = prog.percentage;
-            return updated;
-          });
-          setSpeedList((prev) => {
-            const updated = [...prev];
-            updated[fileIndexRef.current] = prog.speed;
-            return updated;
-          });
-          setTimeRemainingList((prev) => {
-            const updated = [...prev];
-            updated[fileIndexRef.current] = prog.timeRemaining;
-            return updated;
-          });
-        };
-        transfer.onComplete = async (file: Blob, completedFileIndex: number) => {
-          const arrayBuffer = await file.arrayBuffer();
-          const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
-          const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
-          const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-          setFileDebugInfo((prev) => {
-            const updated = [...prev];
-            updated[completedFileIndex] = {
-              hash: hashB64,
-              type: file.type,
-              size: file.size,
-              hex
-            };
-            return updated;
-          });
-          setMetadataList((prev) => {
-            const updated = [...prev];
-            if (!updated[completedFileIndex] && batchMetadata[completedFileIndex]) {
-              updated[completedFileIndex] = batchMetadata[completedFileIndex];
-            }
-            return updated;
-          });
-          setReceivedFiles((prev) => {
-            const updated = [...prev];
-            updated[completedFileIndex] = file;
-            const totalFiles = batchMetadata.length || 1;
-            const receivedCount = updated.filter(Boolean).length;
-            if (receivedCount >= totalFiles) {
-              transferCompleteRef.current = true;
-              setStep('complete');
-              ecdhKeyPairRef.current = null;
-              peerPublicKeyRef.current = null;
-              sharedSecretRef.current = null;
-            }
-            return updated;
-          });
-          fileIndexRef.current++;
-        };
-        transfer.onError = (err) => {
-          if (isMountedRef.current) setError(err.message);
-          ecdhKeyPairRef.current = null;
-          peerPublicKeyRef.current = null;
-          sharedSecretRef.current = null;
-        };
-      };
       const waitForSharedSecret = () => {
         if (sharedSecretRef.current) {
           setHandshakeInProgress(false);
@@ -754,46 +361,97 @@ export default function ReceivePage() {
           setHandshakeInProgress(false);
         }
       };
+
+      // Register signaling event handlers ONCE
+      signaling.on('session-joined', async () => {
+        console.log('[ReceivePage] Session joined');
+        
+        // Generate ECDH key pair
+        const keyPair = await generateECDHKeyPair();
+        ecdhKeyPairRef.current = keyPair;
+        const exported = await exportPublicKey(keyPair.publicKey);
+        const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+        signaling.sendPublicKey(pubKeyB64);
+        
+        setStep('receiving');
+      });
+
+      signaling.on('public-key', async (message) => {
+        console.log('[ReceivePage] Received peer public key');
+        const raw = Uint8Array.from(atob(message.publicKey), c => c.charCodeAt(0));
+        const peerKey = await importPublicKey(raw.buffer);
+        peerPublicKeyRef.current = peerKey;
+        
+        if (ecdhKeyPairRef.current) {
+          sharedSecretRef.current = await deriveSharedSecret(
+            ecdhKeyPairRef.current.privateKey, 
+            peerKey
+          );
+          console.log('[ReceivePage] Shared secret derived');
+        }
+      });
+
+      signaling.on('offer', async (message) => {
+        await rtc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+        const answer = await rtc.createAnswer();
+        signaling.sendAnswer(answer.sdp!);
+      });
+
+      signaling.on('ice-candidate', async (message) => {
+        await rtc.addIceCandidate(message.candidate);
+      });
+
+      // CRITICAL FIX: Better disconnect handling
+      signaling.on('peer-disconnected', handlePeerDisconnect);
+      signaling.on('session-cancel', handlePeerDisconnect);
+      signaling.on('session-reset', handlePeerDisconnect);
+
+      signaling.on('error', (message) => {
+        if (!isMountedRef.current) return;
+        
+        // CRITICAL FIX: Don't reset if files are ready
+        if (transferCompleteRef.current || filesReadyForDownloadRef.current) {
+          setError('Connection error, but your files are safe and ready to download.');
+          return;
+        }
+
+        setError(message.error || 'Session error. Please try again.');
+        setStep('enter-code');
+        setHandshakeInProgress(false);
+      });
+
+      // ICE candidate handler
+      rtc.onIceCandidate = (candidate) => {
+        signaling.sendIceCandidate(candidate);
+      };
+
+      // Start handshake polling
       waitForSharedSecret();
 
-      signaling.joinSession(joinCode);
+      // Join session
+      signaling.joinSession(sessionCode);
+
     } catch (err) {
       if (!isMountedRef.current) return;
-      if (step === 'complete') {
-        setError('Warning: Connection error after transfer. You can still download your files.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Failed to connect');
-        setStep('enter-code');
-        rtcRef.current?.close();
-        signalingRef.current?.disconnect();
-        setBatchMetadata([]);
-        setMetadataList([]);
-        setProgressList([]);
-        setSpeedList([]);
-        setTimeRemainingList([]);
-        setReceivedFiles([]);
-        setHandshakeInProgress(false);
-        fileIndexRef.current = 0;
+      
+      if (transferCompleteRef.current || filesReadyForDownloadRef.current) {
+        setError('Connection error, but your files are safe.');
+        return;
       }
+
+      setError(err instanceof Error ? err.message : 'Failed to connect');
+      setStep('enter-code');
+      setHandshakeInProgress(false);
     }
   };
 
-  const getFallbackMeta = (file: Blob | null, idx: number) => {
-    if (!file) return null;
-    return {
-      name: `File_${idx + 1}.${(file.type && file.type.split('/')[1]) || 'bin'}`,
-      size: file.size,
-      type: file.type || 'application/octet-stream',
-      chunks: 1
-    };
-  };
-
+  // Download handler
   const handleDownload = (fileIndex: number) => {
     const file = receivedFiles[fileIndex];
-    let meta = metadataList[fileIndex];
-    if (!file) return;
-    if (!meta) meta = getFallbackMeta(file, fileIndex);
-    if (!meta) return;
+    const meta = metadataList[fileIndex] || batchMetadata[fileIndex];
+    
+    if (!file || !meta) return;
+
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
@@ -804,16 +462,44 @@ export default function ReceivePage() {
     URL.revokeObjectURL(url);
   };
 
+  // Download all as ZIP
+  const handleDownloadAll = async () => {
+    if (!receivedFiles.length) return;
+    
+    const zip = new JSZip();
+    receivedFiles.forEach((file, idx) => {
+      const meta = metadataList[idx] || batchMetadata[idx];
+      if (file && meta) {
+        zip.file(meta.name, file);
+      }
+    });
+    
+    const content = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(content);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'fluxdrop-files.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Reset for new transfer
   const reset = () => {
-    // Inform peer of reset if connected
-    if (signalingRef.current && signalingRef.current.isConnected()) {
+    // CRITICAL FIX: Clean disconnect
+    if (signalingRef.current?.isConnected()) {
       signalingRef.current.send({ type: 'session-reset' });
     }
-    rtcRef.current?.close();
-    signalingRef.current?.disconnect();
-    transferRef.current?.reset();
+    
+    // Only close connections if transfer is not in progress
+    if (transferCompleteRef.current || !transferRef.current) {
+      rtcRef.current?.close();
+      signalingRef.current?.disconnect();
+    }
+
+    // Reset all state
     setStep('enter-code');
-    // setCode(''); // Do not clear code on reset
     setBatchMetadata([]);
     setMetadataList([]);
     setProgressList([]);
@@ -821,337 +507,376 @@ export default function ReceivePage() {
     setTimeRemainingList([]);
     setReceivedFiles([]);
     setFileDebugInfo([]);
+    setError('');
+    setHandshakeInProgress(false);
     fileIndexRef.current = 0;
+    transferCompleteRef.current = false;
+    filesReadyForDownloadRef.current = false;
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
-      {/* Header */}
-      <header className="border-b bg-white/50 backdrop-blur-sm">
-        <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900">
+    <div className="min-h-screen bg-linear-to-br from-white via-blue-50 to-purple-50">
+      <style jsx>{`
+        @keyframes bounce-once {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-10px); }
+        }
+        .animate-bounce-once {
+          animation: bounce-once 0.6s ease-in-out;
+        }
+      `}</style>
+      
+      <header className="border-b bg-white/80 backdrop-blur-md shadow-sm">
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+          <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 transition-colors">
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
-          {/* Connection Quality/Type Indicator */}
-          <div className="flex items-center gap-2">
-            {isOffline ? (
-              <span className="text-red-600 font-semibold flex items-center gap-1"><svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636A9 9 0 003.515 20.485m2.121-2.121A5.978 5.978 0 0112 18c1.657 0 3.156-.672 4.243-1.757m2.121-2.121A8.963 8.963 0 0021 12c0-2.485-1.007-4.735-2.636-6.364" /></svg>Offline</span>
-            ) : connectionType ? (
-              <span className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-200 text-gray-700 font-semibold flex items-center gap-1">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636A9 9 0 003.515 20.485m2.121-2.121A5.978 5.978 0 0112 18c1.657 0 3.156-.672 4.243-1.757m2.121-2.121A8.963 8.963 0 0021 12c0-2.485-1.007-4.735-2.636-6.364" /></svg>
-                {connectionType} <span className={
-                  connectionQuality === 'good' ? 'text-green-600' :
-                  connectionQuality === 'fair' ? 'text-yellow-600' :
-                  connectionQuality === 'poor' ? 'text-red-600' : ''
-                }>{connectionQuality}</span>
-              </span>
-            ) : null}
-          </div>
+          {isOffline && (
+            <span className="text-red-600 font-semibold text-sm">Offline</span>
+          )}
         </div>
       </header>
-      {/* Handshake progress indicator */}
+
       {handshakeInProgress && (
         <div className="flex flex-col items-center justify-center mt-8">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-400 mb-4"></div>
           <p className="text-purple-700 font-semibold text-lg">Establishing secure connection…</p>
-          <p className="text-gray-500 text-sm mt-2">Waiting for encryption handshake to complete…</p>
         </div>
       )}
-      {/* ...existing code... */}
+
       <main className="container mx-auto px-4 py-16">
         <div className="max-w-2xl mx-auto">
-          {/* Error Message */}
+
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+            <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-lg text-red-700 shadow-sm">
               {error}
             </div>
           )}
-          {/* Resume Prompt */}
+
           {resumeAvailable && (
-            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
-              <div className="font-semibold mb-2">Transfer interrupted</div>
-              <div className="mb-2">You can try to resume the transfer and request missing chunks.</div>
+            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-100 rounded-lg shadow-sm">
+              <p className="font-semibold mb-2 text-yellow-900">Transfer interrupted</p>
               <button
                 onClick={handleResume}
                 disabled={resumeInProgress}
-                className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
+                className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600 disabled:bg-yellow-100 disabled:text-yellow-300 transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-400"
               >
                 {resumeInProgress ? 'Resuming...' : 'Resume Transfer'}
               </button>
             </div>
           )}
 
-          {/* Enter Code or Scan QR */}
           {step === 'enter-code' && (
-            <div className="bg-white rounded-2xl shadow-xl p-8">
+            <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100">
               <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <Download className="w-10 h-10 text-purple-600" />
+                <div className="w-20 h-20 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-4 shadow-sm">
+                  <Download className="w-10 h-10 text-purple-500" />
                 </div>
-                <h2 className="text-3xl font-bold text-gray-900 mb-2">Receive a File</h2>
-                <p className="text-gray-600">Enter the 6-digit code from the sender or scan QR</p>
+                <h2 className="text-3xl font-bold mb-2 text-purple-500">Receive Files</h2>
+                <p className="text-gray-600">Enter the 6-digit code or scan QR</p>
               </div>
 
-              <div className="mb-6 flex flex-col gap-4 items-center">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Transfer Code
-                </label>
+              <div className="mb-6">
                 <input
                   type="text"
                   maxLength={6}
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
                   placeholder="000000"
-                  className="w-full text-4xl font-bold text-center tracking-widest p-4 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none"
+                  className="w-full text-4xl font-bold text-center text-purple-500 tracking-widest p-4 border-2 border-purple-100 rounded-lg focus:border-purple-400 bg-purple-50/50"
                   autoFocus
-                />
-                <ScanQrSection
-                  code={code}
-                  setCode={setCode}
-                  onConnect={handleJoinSessionWithCode}
                 />
               </div>
 
+              <ScanQrSection code={code} setCode={setCode} onConnect={handleJoinSession} />
+
               <button
-                onClick={handleJoinSession}
+                onClick={() => handleJoinSession()}
                 disabled={code.length !== 6}
-                className="w-full bg-purple-600 text-white py-4 px-6 rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-semibold text-lg"
+                className="w-full bg-purple-500 text-white py-4 rounded-lg hover:bg-purple-600 disabled:bg-purple-100 disabled:text-purple-300 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400"
               >
                 Connect
               </button>
             </div>
           )}
 
-          {/* Connecting */}
           {step === 'connecting' && (
-            <div className="bg-white rounded-2xl shadow-xl p-8 text-center">
-              <div className="w-20 h-20 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
-                <Download className="w-10 h-10 text-purple-600" />
+            <div className="bg-white rounded-2xl shadow-lg p-8 text-center border border-gray-100">
+              <div className="w-20 h-20 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse shadow-sm">
+                <Download className="w-10 h-10 text-purple-500" />
               </div>
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">Connecting...</h2>
-              <p className="text-gray-600">Establishing secure connection</p>
+              <h2 className="text-3xl text-purple-500 font-bold mb-2">Connecting...</h2>
+              <p className="text-slate-800">Establishing secure connection</p>
             </div>
           )}
 
-          {/* Receiving */}
-          {step === 'receiving' && (
-            <div className="bg-white rounded-2xl shadow-xl p-8">
-              <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">Receiving Files</h2>
-              {metadataList.length > 0 && (
-                <div className="mb-6">
-                  <ul className="space-y-2">
-                    {metadataList.map((meta, idx) => (
-                      meta ? (
-                        <li key={meta.name + meta.size} className="bg-gray-50 rounded-lg px-4 py-2">
-                          <div className="flex justify-between items-center mb-1">
-                            <span className="font-semibold text-gray-900">{meta.name}</span>
-                            <span className="text-sm text-gray-600">{formatBytes(meta.size)}</span>
-                          </div>
-                          {/* Progress Bar for each file */}
-                          <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+          {step === 'receiving' && metadataList.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-8 border border-gray-100">
+              <div className="text-center mb-6">
+                <div className="w-16 h-16 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-3 animate-pulse">
+                  <Download className="w-8 h-8 text-purple-500" />
+                </div>
+                <h2 className="text-2xl sm:text-3xl text-purple-500 font-bold mb-2">Receiving Files</h2>
+                <p className="text-sm text-gray-600">
+                  {receivedFiles.filter(Boolean).length} of {metadataList.length} complete
+                </p>
+              </div>
+
+              <ul className="space-y-3">
+                {metadataList.map((meta, idx) => {
+                  if (!meta) return null;
+                  
+                  const isComplete = receivedFiles[idx] !== null;
+                  const isActive = !isComplete && progressList[idx] > 0;
+                  const isPending = !isComplete && progressList[idx] === 0;
+                  
+                  return (
+                    <li 
+                      key={meta.name + idx} 
+                      className={`rounded-lg p-3 sm:p-4 border transition-all ${
+                        isComplete 
+                          ? 'bg-green-50/60 border-green-200' 
+                          : isActive 
+                            ? 'bg-purple-50/60 border-purple-200 ring-2 ring-purple-300' 
+                            : 'bg-gray-50/60 border-gray-200'
+                      }`}
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          {isComplete && (
+                            <Check className="w-5 h-5 text-green-600 shrink-0" />
+                          )}
+                          {isActive && (
+                            <div className="w-5 h-5 shrink-0">
+                              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-purple-500"></div>
+                            </div>
+                          )}
+                          <span className={`font-semibold break-all ${
+                            isComplete ? 'text-green-700' : isActive ? 'text-purple-600' : 'text-gray-500'
+                          }`}>
+                            {meta.name}
+                          </span>
+                        </div>
+                        <span className="text-xs sm:text-sm text-gray-600 ml-2 shrink-0">
+                          {formatBytes(meta.size)}
+                        </span>
+                      </div>
+
+                      {!isComplete && (
+                        <>
+                          <div className="w-full h-2.5 sm:h-3 bg-gray-200 rounded-full overflow-hidden mb-1">
                             <div
-                              className="h-full bg-purple-600 transition-all duration-300"
+                              className={`h-full transition-all duration-300 ${
+                                isActive ? 'bg-purple-500' : 'bg-gray-300'
+                              }`}
                               style={{ width: `${progressList[idx] || 0}%` }}
                             />
                           </div>
-                          <div className="flex justify-between text-xs text-gray-500 mt-1">
-                            <span>{Math.round(progressList[idx] || 0)}%</span>
-                            <span>{formatSpeed(speedList[idx] || 0)}</span>
-                            <span>{timeRemainingList[idx] > 0 ? `${formatTime(timeRemainingList[idx])} left` : ''}</span>
+                          
+                          <div className="flex justify-between items-center text-xs text-gray-600 mt-1">
+                            <span className="font-medium">
+                              {isActive 
+                                ? `${Math.round(progressList[idx] || 0)}%` 
+                                : isPending 
+                                  ? 'Waiting...' 
+                                  : '0%'
+                              }
+                            </span>
+                            
+                            {isActive && (
+                              <div className="flex items-center gap-2 sm:gap-3">
+                                <span className="hidden sm:inline">{formatSpeed(speedList[idx] || 0)}</span>
+                                {timeRemainingList[idx] > 0 && (
+                                  <span>{formatTime(timeRemainingList[idx])} left</span>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        </li>
-                      ) : null
-                    ))}
-                  </ul>
+                        </>
+                      )}
+
+                      {isComplete && (
+                        <div className="text-xs text-green-600 font-medium mt-1">
+                          ✓ Complete
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {/* Overall Progress */}
+              <div className="mt-6 pt-4 border-t border-gray-200">
+                <div className="flex justify-between text-sm text-gray-600 mb-2">
+                  <span className="font-medium">Overall Progress</span>
+                  <span>{receivedFiles.filter(Boolean).length} / {metadataList.length} files</span>
                 </div>
-              )}
+                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-linear-to-r from-purple-500 to-blue-500 transition-all duration-500"
+                    style={{ 
+                      width: `${(receivedFiles.filter(Boolean).length / metadataList.length) * 100}%` 
+                    }}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Complete */}
           {step === 'complete' && (
-            <div className="bg-white rounded-2xl shadow-xl p-8">
+            <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-8 border border-gray-100">
               <div className="text-center mb-6">
-                <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4 shadow-sm animate-bounce-once">
                   <Check className="w-10 h-10 text-green-600" />
                 </div>
-                <h2 className="text-3xl font-bold text-gray-900 mb-2">Transfer Complete!</h2>
-                <p className="text-gray-600">Your files are ready to download</p>
+                <h2 className="text-2xl sm:text-3xl text-purple-500 font-bold mb-2">Transfer Complete!</h2>
+                <p className="text-gray-600">
+                  {receivedFiles.filter(Boolean).length} of {batchMetadata.length || metadataList.length} {receivedFiles.filter(Boolean).length === 1 ? 'file' : 'files'} ready to download
+                </p>
               </div>
-                {/* DEBUG: Show state arrays for troubleshooting */}
-                <div className="mb-4 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-900">
-                  <div><b>batchMetadata:</b> {JSON.stringify(batchMetadata)}</div>
-                  <div><b>metadataList:</b> {JSON.stringify(metadataList)}</div>
-                  <div><b>receivedFiles:</b> {JSON.stringify(receivedFiles.map(f => f ? {size: f.size, type: f.type} : null))}</div>
+
+              <div className="bg-green-50 rounded-lg p-3 sm:p-4 mb-6 border border-green-100">
+                <div className="mb-3 pb-3 border-b border-green-200">
+                  <p className="text-sm font-semibold text-green-800">Received Files:</p>
                 </div>
-              <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                <ul className="space-y-2">
-                  {Array.from({ length: Math.max(metadataList.length, receivedFiles.length) }).map((_, idx) => {
-                    // Use the largest length among batchMetadata, metadataList, receivedFiles
-                    const maxLen = Math.max(batchMetadata.length, metadataList.length, receivedFiles.length);
-                    let meta = (batchMetadata[idx] || metadataList[idx]) || null;
-                    const file = receivedFiles[idx] || null;
-                    // If file exists but no metadata, create fallback metadata
-                    if (!meta && file) {
-                      meta = {
-                        name: `File_${idx + 1}.${(file.type && file.type.split('/')[1]) || 'bin'}`,
-                        size: file.size,
-                        type: file.type || 'application/octet-stream',
-                        chunks: 1
-                      };
-                    }
-                    if (!meta) {
-                      return (
-                        <li key={idx} className="flex justify-between items-center opacity-50">
-                          <span className="font-semibold text-gray-400">File not ready</span>
-                        </li>
-                      );
-                    }
-                    const url = file ? URL.createObjectURL(file) : undefined;
-                    const isImage = meta.type && meta.type.startsWith('image/');
+                <ul className="space-y-2 max-h-96 overflow-y-auto">
+                  {(batchMetadata.length > 0 ? batchMetadata : metadataList).map((meta, idx) => {
+                    if (!meta) return null;
+                    const file = receivedFiles[idx];
+                    const isReceived = file !== null;
+
                     return (
-                      <li key={meta.name + meta.size} className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                        <div className="flex flex-col gap-1 md:flex-row md:items-center">
-                          <span className={file ? "font-semibold text-gray-900" : "font-semibold text-gray-400 line-through"}>{meta.name}</span>
-                          <span className="text-sm text-gray-600 md:ml-4">{formatBytes(meta.size)}</span>
-                        </div>
-                        <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
-                          {file ? (
-                            <>
-                              {isImage && url && (
-                                <img
-                                  src={url}
-                                  alt={meta.name}
-                                  style={{ maxWidth: 120, maxHeight: 80, borderRadius: 8, border: '1px solid #eee' }}
-                                  loading="lazy"
-                                  decoding="async"
-                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                />
-                              )}
-                              <button
-                                onClick={() => { handleDownload(idx); }}
-                                className="bg-purple-600 text-white py-1 px-3 rounded hover:bg-purple-700 text-xs font-semibold flex items-center gap-1"
-                              >
-                                <Download className="w-4 h-4" />
-                                Download
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setReceivedFiles((prev) => {
-                                    const updated = [...prev];
-                                    updated[idx] = null;
-                                    return updated;
-                                  });
-                                  setMetadataList((prev) => {
-                                    const updated = [...prev];
-                                    updated[idx] = null;
-                                    return updated;
-                                  });
-                                }}
-                                className="bg-red-100 text-red-700 py-1 px-2 rounded hover:bg-red-200 text-xs font-semibold"
-                              >
-                                Remove
-                              </button>
-                            </>
+                      <li 
+                        key={idx} 
+                        className={`flex justify-between items-center gap-2 p-2 rounded transition-colors ${
+                          isReceived ? 'hover:bg-green-100/50' : 'bg-yellow-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          {isReceived ? (
+                            <Check className="w-4 h-4 text-green-600 shrink-0" />
                           ) : (
-                            <>
-                              <span className="text-xs text-red-500 font-semibold">Removed</span>
-                              <button
-                                onClick={() => {
-                                  setMetadataList((prev) => {
-                                    const updated = [...prev];
-                                    updated[idx] = prev[idx];
-                                    return updated;
-                                  });
-                                }}
-                                className="bg-gray-200 text-gray-700 py-1 px-2 rounded hover:bg-gray-300 text-xs font-semibold"
-                              >
-                                Restore
-                              </button>
-                            </>
+                            <div className="w-4 h-4 shrink-0">
+                              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-500"></div>
+                            </div>
                           )}
+                          <div className="min-w-0 flex-1">
+                            <span className={`font-semibold block truncate ${
+                              isReceived ? 'text-gray-900' : 'text-yellow-700'
+                            }`}>
+                              {meta.name}
+                            </span>
+                            <span className="text-xs text-gray-600">{formatBytes(meta.size)}</span>
+                          </div>
                         </div>
+                        {isReceived ? (
+                          <button
+                            onClick={() => handleDownload(idx)}
+                            className="bg-purple-500 text-white px-3 py-2 rounded hover:bg-purple-600 flex items-center gap-1 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 shrink-0"
+                            aria-label={`Download ${meta.name}`}
+                          >
+                            <Download className="w-4 h-4" />
+                            <span className="hidden sm:inline text-sm">Download</span>
+                          </button>
+                        ) : (
+                          <span className="text-xs text-yellow-600 shrink-0 px-2">
+                            {progressList[idx] > 0 ? `${Math.round(progressList[idx])}%` : 'Pending'}
+                          </span>
+                        )}
                       </li>
                     );
                   })}
                 </ul>
               </div>
+
+              {/* Overall progress bar if not all files received */}
+              {receivedFiles.filter(Boolean).length < (batchMetadata.length || metadataList.length) && (
+                <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <div className="flex justify-between text-sm text-yellow-800 mb-2">
+                    <span className="font-medium">Transfer in progress...</span>
+                    <span>{receivedFiles.filter(Boolean).length} / {batchMetadata.length || metadataList.length}</span>
+                  </div>
+                  <div className="w-full h-2 bg-yellow-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-yellow-500 transition-all duration-500"
+                      style={{ 
+                        width: `${(receivedFiles.filter(Boolean).length / (batchMetadata.length || metadataList.length)) * 100}%` 
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-3">
-                <button
-                  onClick={async () => {
-                    if (!receivedFiles.length) return;
-                    const zip = new JSZip();
-                    receivedFiles.forEach((file, idx) => {
-                      let meta = metadataList[idx];
-                      if (!meta && file) meta = getFallbackMeta(file, idx);
-                      if (file && meta) {
-                        zip.file(meta.name, file);
-                      }
-                    });
-                    const content = await zip.generateAsync({ type: 'blob' });
-                    const url = URL.createObjectURL(content);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'fluxdrop-files.zip';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }}
-                  className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold"
-                >
-                  Download All as ZIP
-                </button>
+                {receivedFiles.filter(Boolean).length > 1 && (
+                  <button
+                    onClick={handleDownloadAll}
+                    disabled={receivedFiles.filter(Boolean).length < (batchMetadata.length || metadataList.length)}
+                    className="w-full bg-purple-500 text-white py-3 rounded-lg hover:bg-purple-600 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-5 h-5" />
+                    {receivedFiles.filter(Boolean).length < (batchMetadata.length || metadataList.length)
+                      ? 'Waiting for all files...'
+                      : 'Download All as ZIP'}
+                  </button>
+                )}
                 <button
                   onClick={reset}
-                  className="w-full bg-white border border-gray-300 text-gray-700 py-3 px-6 rounded-lg hover:bg-gray-50 transition-colors font-semibold"
+                  className="w-full bg-white border-2 border-gray-200 py-3 rounded-lg hover:bg-gray-50 font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-200 transition-colors"
                 >
                   Receive More Files
                 </button>
               </div>
             </div>
           )}
-
-          {/* Debug UI removed */}
         </div>
       </main>
     </div>
   );
 }
 
-
-function ScanQrSection({ code, setCode, onConnect }: { code: string, setCode: (c: string) => void, onConnect: (scannedCode: string) => void }) {
+function ScanQrSection({ 
+  code, 
+  setCode, 
+  onConnect 
+}: { 
+  code: string; 
+  setCode: (c: string) => void; 
+  onConnect: (scannedCode: string) => void;
+}) {
   const [showScanner, setShowScanner] = useState(false);
+  
   const handleResult = useCallback((text: string) => {
-    // Try to extract code from URL or plain code
-    let match = text.match(/code=([A-Z0-9]{6})/i);
-    let found = match ? match[1] : text.match(/[A-Z0-9]{6}/i)?.[0];
+    const match = text.match(/code=([A-Z0-9]{6})/i);
+    const found = match ? match[1] : text.match(/[A-Z0-9]{6}/i)?.[0];
+    
     if (found) {
       const scanned = found.toUpperCase();
       setCode(scanned);
       setShowScanner(false);
-      if (scanned.length === 6) {
+       if (scanned.length === 6) {
         onConnect(scanned);
       }
     }
   }, [setCode, onConnect]);
+
   return (
-    <div className="w-full flex flex-col items-center">
+    <div className="w-full mb-4">
       <button
         type="button"
-        className="mt-2 mb-2 px-4 py-3 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 font-semibold w-full max-w-xs text-base sm:text-lg touch-manipulation"
-        style={{ minHeight: 48 }}
-        onClick={() => setShowScanner((v) => !v)}
+        className="w-full px-4 py-3 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 font-semibold mb-4"
+        onClick={() => setShowScanner(v => !v)}
       >
-        {showScanner ? 'Close QR Scanner' : 'Scan QR Code'}
+        {showScanner ? 'Close Scanner' : 'Scan QR Code'}
       </button>
+      
       {showScanner && (
-        <div className="w-full flex flex-col items-center">
-          <div className="w-full max-w-xs aspect-square rounded-lg overflow-hidden border border-purple-200 bg-black">
+        <div className="w-full max-w-xs mx-auto">
+          <div className="aspect-square rounded-lg overflow-hidden border-2 border-purple-200">
             <QRScanner onResult={handleResult} />
           </div>
-          <div className="text-xs text-gray-500 mt-2">Point your camera at the sender's QR code</div>
+          <p className="text-xs text-gray-500 mt-2 text-center">Point camera at QR code</p>
         </div>
       )}
     </div>

@@ -4,15 +4,16 @@
 import { useState } from 'react';
 import { Upload, Download, Zap } from 'lucide-react';
 import Link from 'next/link';
+import Image from 'next/image';
 
 export default function HomePage() {
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-100 via-white to-purple-100">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm" role="banner">
-        <div className="container mx-auto px-4 py-4">
+        <div className="container mx-auto px-4 py-2">
           <div className="flex items-center gap-2">
-            <Zap className="w-8 h-8 text-blue-600" aria-label="FluxDrop logo" />
+            <Image src={"/logo.png"} width={200} height={200} className="w-10 h-10 text-blue-600 rounded-2xl" alt='FluxDrop logo'/>
             <h1 className="text-2xl font-bold text-gray-900">FluxDrop</h1>
           </div>
         </div>
