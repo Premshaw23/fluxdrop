@@ -617,6 +617,7 @@ export default function ReceivePage() {
                                   src={url}
                                   alt={meta.name}
                                   style={{ maxWidth: 120, maxHeight: 80, borderRadius: 8, border: '1px solid #eee' }}
+                                  loading="lazy"
                                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                 />
                               )}

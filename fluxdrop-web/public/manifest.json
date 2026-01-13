@@ -1,0 +1,46 @@
+{
+	"id": "/",
+	"name": "FluxDrop",
+	"short_name": "FluxDrop",
+	"description": "Share files instantly between devices. Zero setup, end-to-end encrypted, no storage.",
+	"start_url": "/",
+	"display": "standalone",
+	"theme_color": "#0f172a",
+	"background_color": "#020617",
+	"icons": [
+		{
+			"src": "icons/logo-16x16.png",
+			"sizes": "16x16",
+			"type": "image/png"
+		},
+		{
+			"src": "icons/logo-32x32.png",
+			"sizes": "32x32",
+			"type": "image/png"
+		},
+		{
+			"src": "icons/logo-192x192.png",
+			"sizes": "192x192",
+			"type": "image/png"
+		},
+		{
+			"src": "icons/logo-512x512.png",
+			"sizes": "512x512",
+			"type": "image/png"
+		}
+	],
+	"screenshots": [
+		{
+			"src": "screenshots/desktop-1.png",
+			"sizes": "1919x971",
+			"type": "image/png",
+			"form_factor": "wide"
+		},
+		{
+			"src": "screenshots/mobile-1.png",
+			"sizes": "408x469",
+			"type": "image/png",
+			"form_factor": "narrow"
+		}
+	]
+}

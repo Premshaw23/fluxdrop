@@ -388,10 +388,6 @@ export default function SendPage() {
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
       {/* Debug UI removed */}
-      {/* Mobile viewport meta tag for App Router (if not already in _app or layout) */}
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-      </head>
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
@@ -479,6 +475,7 @@ export default function SendPage() {
                             src={URL.createObjectURL(f)}
                             alt={f.name}
                             className="w-24 h-24 object-cover rounded mb-2 border"
+                            loading="lazy"
                             onLoad={e => URL.revokeObjectURL((e.target as HTMLImageElement).src)}
                           />
                         ) : isVideo ? (

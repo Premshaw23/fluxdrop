@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://fluxdrop.com/sitemap.xml
