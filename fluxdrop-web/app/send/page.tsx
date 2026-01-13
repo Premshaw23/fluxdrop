@@ -99,8 +99,14 @@ export default function SendPage() {
     transferRef.current = null;
     rtcRef.current = null;
     signalingRef.current = null;
-    setFiles(selectedFiles);
-    filesRef.current = selectedFiles;
+    // Sort files by webkitRelativePath if present, else by name
+    const sortedFiles = [...selectedFiles].sort((a, b) => {
+      const aPath = (a as any).webkitRelativePath || a.name;
+      const bPath = (b as any).webkitRelativePath || b.name;
+      return aPath.localeCompare(bPath);
+    });
+    setFiles(sortedFiles);
+    filesRef.current = sortedFiles;
     setProgressList(new Array(selectedFiles.length).fill(0));
     setSpeedList(new Array(selectedFiles.length).fill(0));
     setTimeRemainingList(new Array(selectedFiles.length).fill(0));
@@ -535,35 +541,71 @@ export default function SendPage() {
                   <Upload className="w-10 h-10 text-blue-600" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900 mb-2">Send Files</h2>
-                <p className="text-gray-600">Choose one or more files to share instantly</p>
+                <p className="text-gray-600">Choose one or more files or a folder to share instantly</p>
               </div>
 
-              <label className="block">
-                <input
-                  type="file"
-                  multiple
-                  onChange={handleFileSelect}
-                  className="hidden"
-                  ref={fileInputRef}
-                />
-                <div
-                  className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors select-none ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50'}`}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  role="button"
-                  tabIndex={0}
-                  aria-label="Select files to send"
-                  style={{ touchAction: 'manipulation' }}
-                >
-                  <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-lg text-gray-700 mb-2">Tap or drag files here</p>
-                  <p className="text-sm text-gray-500">Any file up to 2GB each</p>
-                  {isDragActive && (
-                    <div className="mt-2 text-blue-600 font-semibold">Drop files to select</div>
-                  )}
-                </div>
-              </label>
+              <div className="flex flex-col sm:flex-row gap-4 mb-4">
+                <label className="block w-full">
+                  <input
+                    type="file"
+                    multiple
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    ref={fileInputRef}
+                  />
+                  <button
+                    type="button"
+                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold mb-2"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Select Files
+                  </button>
+                </label>
+                <label className="block w-full">
+                  <input
+                    type="file"
+                    multiple
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    ref={el => {
+                      if (el) {
+                        // @ts-ignore
+                        el.setAttribute('webkitdirectory', '');
+                        // @ts-ignore
+                        el.setAttribute('directory', '');
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold mb-2"
+                    onClick={e => {
+                      const input = (e.currentTarget.parentElement?.querySelector('input[type=\"file\"]') as HTMLInputElement);
+                      input?.click();
+                    }}
+                  >
+                    Select Folder
+                  </button>
+                </label>
+              </div>
+
+              <div
+                className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors select-none ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50'}`}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                role="button"
+                tabIndex={0}
+                aria-label="Select files to send"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                <p className="text-lg text-gray-700 mb-2">Tap or drag files or folders here</p>
+                <p className="text-sm text-gray-500">Any file up to 2GB each. Folder structure will be preserved.</p>
+                {isDragActive && (
+                  <div className="mt-2 text-blue-600 font-semibold">Drop files or folders to select</div>
+                )}
+              </div>
 
               {/* Selected files preview */}
               {files.length > 0 && (

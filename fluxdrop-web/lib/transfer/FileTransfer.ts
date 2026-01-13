@@ -11,6 +11,7 @@ export interface FileMetadata {
   size: number;
   type: string;
   chunks: number;
+  relativePath?: string;
 }
 
 export interface TransferProgress {
@@ -186,7 +187,8 @@ export class FileTransferSender {
         name: f.name,
         size: f.size,
         type: f.type,
-        chunks: Math.ceil(f.size / CHUNK_SIZE)
+        chunks: Math.ceil(f.size / CHUNK_SIZE),
+        relativePath: (f as any).webkitRelativePath || f.name
       }))
     };
     console.log('[FileTransferSender] Sending batch-metadata:', batchMetadata);
@@ -225,7 +227,8 @@ export class FileTransferSender {
         name: file.name,
         size: file.size,
         type: file.type,
-        chunks: this.chunks.length
+        chunks: this.chunks.length,
+        relativePath: (file as any).webkitRelativePath || file.name
       };
       this.sendMessage({ type: 'metadata', metadata });
 
