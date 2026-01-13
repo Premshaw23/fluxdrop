@@ -247,7 +247,7 @@ export class FileTransferSender {
     const timestamp = new Date().toLocaleTimeString();
     this.errorLog.push(`[${timestamp}] ${msg}`);
     // Also print to console for dev
-    console.error(`[FileTransferSender] ${msg}`);
+    // console.error(`[FileTransferSender] ${msg}`);
   }
 
   /**

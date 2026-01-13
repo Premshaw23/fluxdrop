@@ -189,7 +189,7 @@ export class RTCConnection {
 
     this.dataChannel.onerror = (error) => {
       console.log('[RTCConnection][DEBUG] Data channel onerror event');
-      console.error('❌ Data channel error:', error);
+      // console.error('❌ Data channel error:', error);
       this.config.onError?.(new Error('Data channel error'));
     };
   }

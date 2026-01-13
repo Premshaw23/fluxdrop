@@ -13,6 +13,18 @@ import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecr
 type Step = 'enter-code' | 'connecting' | 'receiving' | 'complete';
 
 export default function ReceivePage() {
+  // Resume state
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [resumeInProgress, setResumeInProgress] = useState(false);
+  // Connection quality/type indicator state
+  const [connectionType, setConnectionType] = useState<string>('');
+  const [connectionQuality, setConnectionQuality] = useState<string>('');
+  const [isOffline, setIsOffline] = useState<boolean>(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
+      setIsOffline(!navigator.onLine);
+    }
+  }, []);
   // ECDH state
   const ecdhKeyPairRef = useRef<{ publicKey: CryptoKey, privateKey: CryptoKey } | null>(null);
   const peerPublicKeyRef = useRef<CryptoKey | null>(null);
@@ -41,8 +53,24 @@ export default function ReceivePage() {
   // Track if transfer is complete, for robust error suppression
   const transferCompleteRef = useRef(false);
 
+  // Track if component is mounted to prevent setState after unmount
+  const isMountedRef = useRef(true);
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  // Listen for online/offline events
+  useEffect(() => {
+    const handleOnline = () => { if (isMountedRef.current) setIsOffline(false); };
+    const handleOffline = () => { if (isMountedRef.current) setIsOffline(true); };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
       // Inform peer of cancel on unmount if connected
       if (signalingRef.current && signalingRef.current.isConnected()) {
         signalingRef.current.send({ type: 'session-cancel' });
@@ -60,6 +88,40 @@ export default function ReceivePage() {
     };
   }, []);
 
+  // Manual resume handler (move to component scope)
+  const handleResume = async () => {
+    if (!isMountedRef.current) return;
+    setResumeInProgress(true);
+    setError('');
+    // Try to reconnect and request missing chunks
+    try {
+      if (!signalingRef.current || !rtcRef.current || !transferRef.current) {
+        if (isMountedRef.current) {
+          setError('Cannot resume: connection not initialized.');
+          setResumeInProgress(false);
+        }
+        return;
+      }
+      await signalingRef.current.connect();
+      await rtcRef.current.initialize('receiver');
+      // Request missing chunks
+      transferRef.current.requestMissingChunks((msg) => {
+        // Send as ArrayBuffer
+        const encoder = new TextEncoder();
+        rtcRef.current?.send(encoder.encode(JSON.stringify(msg)));
+      });
+      if (isMountedRef.current) {
+        setResumeInProgress(false);
+        setResumeAvailable(false);
+      }
+    } catch (err) {
+      if (isMountedRef.current) {
+        setError('Resume failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        setResumeInProgress(false);
+      }
+    }
+  };
+
   const handleJoinSession = async () => {
     if (code.length !== 6) {
       setError('Please enter a 6-digit code');
@@ -68,6 +130,15 @@ export default function ReceivePage() {
     setStep('connecting');
     setError('');
     setHandshakeInProgress(true);
+    // Always reset transfer state before joining session
+    setBatchMetadata([]);
+    setMetadataList([]);
+    setProgressList([]);
+    setSpeedList([]);
+    setTimeRemainingList([]);
+    setReceivedFiles([]);
+    setFileDebugInfo([]);
+    fileIndexRef.current = 0;
 
     try {
       // Connect to signaling server
@@ -80,26 +151,20 @@ export default function ReceivePage() {
       // Initialize WebRTC
       const rtc = new RTCConnection({
         onStateChange: (state) => {
-          console.log('Connection state:', state);
           if (state === 'failed') {
             setError('Connection failed. Please try again.');
           }
         },
-        onDataChannelOpen: () => {
-          console.log('Data channel ready');
-        },
+        onDataChannelOpen: () => {},
         onMessage: (data) => {
-          console.log('[ReceivePage][DEBUG] RTCConnection onMessage called, bytes:', data.byteLength);
           transferRef.current?.handleMessage(data);
         },
         onError: (err) => {
-          // Debug log for error and step
-          console.log('[ReceivePage][DEBUG] onError called:', err, 'step:', stepRef.current);
+          // ...existing error logic...
           if (typeof err === 'object' && err !== null) {
             if ('name' in err) console.log('[ReceivePage][DEBUG] err.name:', (err as any).name);
             if ('message' in err) console.log('[ReceivePage][DEBUG] err.message:', (err as any).message);
           }
-          // Suppress 'User-Initiated Abort' errors after transfer complete
           const isOpError = (e: unknown): e is { name: string; message?: string } =>
             typeof e === 'object' && e !== null && 'name' in e && typeof (e as any).name === 'string';
           let opError: { name: string; message?: string } | undefined = undefined;
@@ -107,31 +172,20 @@ export default function ReceivePage() {
             opError = err as any;
           }
           if (err.message === 'Data channel error' || opError) {
-            // Robust: suppress after transfer complete, even if step is not 'complete'
             if (stepRef.current === 'complete' || transferCompleteRef.current) {
               if (opError && (opError.message?.includes('User-Initiated Abort') || opError.message?.includes('Close called'))) {
-                // Suppress error
-                console.log('[ReceivePage][DEBUG] Suppressing User-Initiated Abort/Close error after complete (transferCompleteRef)');
                 return;
               }
-              setError('Warning: Sender disconnected. You can still download your files.');
+              if (isMountedRef.current) setError('Warning: Sender disconnected. You can still download your files.');
             } else {
-              setError('Connection lost. The sender has reset or closed the session. Please enter a new code to receive files.');
-              setStep('enter-code');
-              rtcRef.current?.close();
-              signalingRef.current?.disconnect();
-              setBatchMetadata([]);
-              setMetadataList([]);
-              setProgressList([]);
-              setSpeedList([]);
-              setTimeRemainingList([]);
-              setReceivedFiles([]);
-              setHandshakeInProgress(false);
-              fileIndexRef.current = 0;
-              transferCompleteRef.current = false;
+              if (isMountedRef.current) {
+                setError('Connection lost. The sender has reset or closed the session. You may be able to resume the transfer.');
+                setResumeAvailable(true);
+                setResumeInProgress(false);
+              }
             }
           } else {
-            setError(err.message);
+            if (isMountedRef.current) setError(err.message);
           }
         }
       });
@@ -249,7 +303,7 @@ export default function ReceivePage() {
           fileIndexRef.current++;
         };
         transfer.onError = (err) => {
-          setError(err.message);
+          if (isMountedRef.current) setError(err.message);
           ecdhKeyPairRef.current = null;
           peerPublicKeyRef.current = null;
           sharedSecretRef.current = null;
@@ -272,6 +326,7 @@ export default function ReceivePage() {
       signaling.on('session-joined', async () => {
         signaling.on('peer-disconnected', () => {
           console.warn('[ReceivePage] Peer disconnected');
+          if (!isMountedRef.current) return;
           if (step === 'complete') {
             setError('Warning: Sender disconnected. You can still download your files.');
           } else {
@@ -291,6 +346,7 @@ export default function ReceivePage() {
         });
         // Listen for session-cancel and session-reset from peer
         signaling.on('session-cancel', () => {
+          if (!isMountedRef.current) return;
           if (step === 'complete') {
             setError('Warning: Sender cancelled the session. You can still download your files.');
           } else {
@@ -309,6 +365,7 @@ export default function ReceivePage() {
           }
         });
         signaling.on('session-reset', () => {
+          if (!isMountedRef.current) return;
           if (step === 'complete') {
             setError('Warning: Sender reset the session. You can still download your files.');
           } else {
@@ -359,6 +416,7 @@ export default function ReceivePage() {
       });
 
       signaling.on('error', (message) => {
+        if (!isMountedRef.current) return;
         if (step === 'complete') {
           setError('Warning: Signaling error after transfer. You can still download your files.');
         } else {
@@ -385,6 +443,7 @@ export default function ReceivePage() {
       // Join session
       signaling.joinSession(code);
     } catch (err) {
+      if (!isMountedRef.current) return;
       if (step === 'complete') {
         setError('Warning: Connection error after transfer. You can still download your files.');
       } else {
@@ -455,11 +514,26 @@ export default function ReceivePage() {
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
-        <div className="container mx-auto px-4 py-4">
+        <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900">
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
+          {/* Connection Quality/Type Indicator */}
+          <div className="flex items-center gap-2">
+            {isOffline ? (
+              <span className="text-red-600 font-semibold flex items-center gap-1"><svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636A9 9 0 003.515 20.485m2.121-2.121A5.978 5.978 0 0112 18c1.657 0 3.156-.672 4.243-1.757m2.121-2.121A8.963 8.963 0 0021 12c0-2.485-1.007-4.735-2.636-6.364" /></svg>Offline</span>
+            ) : connectionType ? (
+              <span className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-200 text-gray-700 font-semibold flex items-center gap-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636A9 9 0 003.515 20.485m2.121-2.121A5.978 5.978 0 0112 18c1.657 0 3.156-.672 4.243-1.757m2.121-2.121A8.963 8.963 0 0021 12c0-2.485-1.007-4.735-2.636-6.364" /></svg>
+                {connectionType} <span className={
+                  connectionQuality === 'good' ? 'text-green-600' :
+                  connectionQuality === 'fair' ? 'text-yellow-600' :
+                  connectionQuality === 'poor' ? 'text-red-600' : ''
+                }>{connectionQuality}</span>
+              </span>
+            ) : null}
+          </div>
         </div>
       </header>
       {/* Handshake progress indicator */}
@@ -477,6 +551,20 @@ export default function ReceivePage() {
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
               {error}
+            </div>
+          )}
+          {/* Resume Prompt */}
+          {resumeAvailable && (
+            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
+              <div className="font-semibold mb-2">Transfer interrupted</div>
+              <div className="mb-2">You can try to resume the transfer and request missing chunks.</div>
+              <button
+                onClick={handleResume}
+                disabled={resumeInProgress}
+                className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
+              >
+                {resumeInProgress ? 'Resuming...' : 'Resume Transfer'}
+              </button>
             </div>
           )}
 

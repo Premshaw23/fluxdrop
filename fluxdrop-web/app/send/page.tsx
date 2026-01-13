@@ -13,6 +13,18 @@ import { generateECDHKeyPair, exportPublicKey, importPublicKey, deriveSharedSecr
 type Step = 'select' | 'waiting' | 'connected' | 'transferring' | 'complete';
 
 export default function SendPage() {
+  // Resume state
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [resumeInProgress, setResumeInProgress] = useState(false);
+  // Connection quality/type indicator state
+  const [connectionType, setConnectionType] = useState<string>('');
+  const [connectionQuality, setConnectionQuality] = useState<string>('');
+  const [isOffline, setIsOffline] = useState<boolean>(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
+      setIsOffline(!navigator.onLine);
+    }
+  }, []);
     // Add state to store file debug info
     const [fileDebugInfo, setFileDebugInfo] = useState<Array<{hash?: string, type?: string, size?: number, hex?: string}>>([]);
   // ECDH state
@@ -50,8 +62,15 @@ export default function SendPage() {
     }
   }, [readyToTransfer]);
 
+  // Listen for online/offline events
   useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
     return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
       // Inform peer of cancel on unmount if connected
       if (signalingRef.current && signalingRef.current.isConnected()) {
         signalingRef.current.send({ type: 'session-cancel' });
@@ -64,6 +83,15 @@ export default function SendPage() {
 
   const handleFiles = (selectedFiles: File[]) => {
     if (selectedFiles.length === 0) return;
+    // Always reset sender state before starting a new transfer
+    transferRef.current?.cancel();
+    rtcRef.current?.close();
+    signalingRef.current?.disconnect();
+    dataChannelReadyRef.current = false;
+    filesRef.current = [];
+    transferRef.current = null;
+    rtcRef.current = null;
+    signalingRef.current = null;
     setFiles(selectedFiles);
     filesRef.current = selectedFiles;
     setProgressList(new Array(selectedFiles.length).fill(0));
@@ -143,6 +171,37 @@ export default function SendPage() {
     setIsDragActive(false);
   };
 
+  // Manual resume handler (move to component scope)
+  const handleResume = async () => {
+    setResumeInProgress(true);
+    setError('');
+    // Try to reconnect and resend missing chunks
+    try {
+      if (!signalingRef.current || !rtcRef.current || !transferRef.current) {
+        setError('Cannot resume: connection not initialized.');
+        setResumeInProgress(false);
+        return;
+      }
+      await signalingRef.current.connect();
+      await rtcRef.current.initialize('sender');
+      // Resend missing chunks if any
+      if (typeof (transferRef.current as any).handleResumeRequest === 'function') {
+        // For demo, just call with all unsent chunks
+        const unsent = (transferRef.current as any).sentChunkBitmap
+          ? (transferRef.current as any).sentChunkBitmap.map((sent: boolean, idx: number) => sent ? null : idx).filter((v: number | null) => v !== null)
+          : [];
+        if (unsent.length > 0) {
+          await (transferRef.current as any).handleResumeRequest(unsent);
+        }
+      }
+      setResumeInProgress(false);
+      setResumeAvailable(false);
+    } catch (err) {
+      setError('Resume failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setResumeInProgress(false);
+    }
+  };
+
   const initializeConnection = async () => {
     try {
       // Connect to signaling server
@@ -155,7 +214,6 @@ export default function SendPage() {
       // Initialize WebRTC
       const rtc = new RTCConnection({
         onStateChange: (state) => {
-          // ...existing code...
           if (state === 'connected') {
             setStep('connected');
           } else if (state === 'failed') {
@@ -163,19 +221,23 @@ export default function SendPage() {
           }
         },
         onDataChannelOpen: () => {
-          console.log('[SendPage][DEBUG] Data channel opened');
           dataChannelReadyRef.current = true;
-          // Only start transfer if files are selected and handshake is complete
           if (filesRef.current.length > 0 && sharedSecretRef.current) {
             setReadyToTransfer(true);
           }
         },
         onError: (err) => {
-          // ...existing code...
           setError(err.message);
+          // If error is a data channel or connection error, show resume option
+          if (err.message && (err.message.includes('data channel') || err.message.includes('Connection failed'))) {
+            setResumeAvailable(true);
+            setResumeInProgress(false);
+          }
         }
       });
       rtcRef.current = rtc;
+
+      // Patch: If you want to listen for connection stats, add a public event or polling in RTCConnection and update here.
 
       await rtc.initialize('sender');
 
@@ -387,14 +449,28 @@ export default function SendPage() {
 
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
-      {/* Debug UI removed */}
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm">
-        <div className="container mx-auto px-4 py-4">
+        <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <Link href="/" className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900">
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
+          {/* Connection Quality/Type Indicator */}
+          <div className="flex items-center gap-2">
+            {isOffline ? (
+              <span className="text-red-600 font-semibold flex items-center gap-1"><Wifi className="w-4 h-4" />Offline</span>
+            ) : connectionType ? (
+              <span className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-200 text-gray-700 font-semibold flex items-center gap-1">
+                <Wifi className="w-4 h-4" />
+                {connectionType} <span className={
+                  connectionQuality === 'good' ? 'text-green-600' :
+                  connectionQuality === 'fair' ? 'text-yellow-600' :
+                  connectionQuality === 'poor' ? 'text-red-600' : ''
+                }>{connectionQuality}</span>
+              </span>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -420,6 +496,20 @@ export default function SendPage() {
                   </ul>
                 </div>
               )}
+            </div>
+          )}
+          {/* Resume Prompt */}
+          {resumeAvailable && (
+            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
+              <div className="font-semibold mb-2">Transfer interrupted</div>
+              <div className="mb-2">You can try to resume the transfer and resend missing chunks.</div>
+              <button
+                onClick={handleResume}
+                disabled={resumeInProgress}
+                className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
+              >
+                {resumeInProgress ? 'Resuming...' : 'Resume Transfer'}
+              </button>
             </div>
           )}
 
