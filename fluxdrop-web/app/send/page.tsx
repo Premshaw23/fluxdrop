@@ -217,6 +217,137 @@ export default function SendPage() {
     }
   };
 
+  const startTransfer = useCallback(async (selectedFiles: File[]) => {
+    if (!selectedFiles.length) {
+      setError(
+        "No files selected. Please select at least one file or folder to send."
+      );
+      setStep("select");
+      return;
+    }
+
+    console.log("[SendPage] startTransfer called", {
+      selectedFiles,
+      rtcRef: rtcRef.current,
+    });
+
+    if (!rtcRef.current) {
+      setError("Connection not established. Please try again.");
+      setStep("select");
+      return;
+    }
+
+    if (!sharedSecretRef.current) {
+      setError(
+        "Encryption handshake not complete. Please wait for the connection to establish before sending files."
+      );
+      return;
+    }
+
+    // Calculate debug info for each file
+    Promise.all(
+      selectedFiles.map(async (file) => {
+        const arrayBuffer = await file.arrayBuffer();
+        const hashBuffer = await window.crypto.subtle.digest(
+          "SHA-256",
+          arrayBuffer
+        );
+        const hashB64 = btoa(
+          String.fromCharCode(...new Uint8Array(hashBuffer))
+        );
+        const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join(" ");
+        return {
+          hash: hashB64,
+          type: file.type,
+          size: file.size,
+          hex,
+        };
+      })
+    ).then((info) => {
+      if (isMountedRef.current) setFileDebugInfo(info);
+    });
+
+    if (isMountedRef.current) setStep("transferring");
+
+    const transfer = new FileTransferSender(
+      (data) => {
+        console.log("[SendPage] rtc.send called, bytes:", data.byteLength);
+        return rtcRef.current!.send(data);
+      },
+      () => rtcRef.current!.getBufferedAmount(),
+      () => rtcRef.current!.getDataChannelState()
+    );
+
+    transfer.setEncryptionKey(sharedSecretRef.current);
+    transferRef.current = transfer;
+
+    transfer.onProgress = (prog) => {
+      if (!isMountedRef.current) return;
+
+      const fileIdx = transfer.fileIndex;
+      setProgressList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = prog.percentage;
+        return updated;
+      });
+      setSpeedList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = prog.speed;
+        return updated;
+      });
+      setTimeRemainingList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = prog.timeRemaining;
+        return updated;
+      });
+    };
+
+    transfer.onComplete = () => {
+      console.log("[SendPage] transfer.onComplete called");
+
+      if (!isMountedRef.current) return;
+
+      // CRITICAL FIX: Mark transfer as complete
+      transferCompleteRef.current = true;
+      filesSuccessfullySentRef.current = true;
+
+      setProgressList((prev) => prev.map(() => 100));
+      setStep("complete");
+
+      // Clear keys after transfer
+      ecdhKeyPairRef.current = null;
+      peerPublicKeyRef.current = null;
+      sharedSecretRef.current = null;
+    };
+
+    transfer.onError = (err) => {
+      console.log("[SendPage] transfer.onError called", err);
+
+      if (!isMountedRef.current) return;
+
+      // CRITICAL FIX: Don't show errors if transfer complete
+      if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
+        console.log("[SendPage] Ignoring error after transfer complete:", err);
+        return;
+      }
+
+      setError(err.message);
+      setErrorLog((prev) => [
+        ...prev,
+        `[${new Date().toLocaleTimeString()}] ${err.message}`,
+      ]);
+
+      // Clear keys on error
+      ecdhKeyPairRef.current = null;
+      peerPublicKeyRef.current = null;
+      sharedSecretRef.current = null;
+    };
+
+    await transfer.startBatchTransfer(selectedFiles);
+  }, []);
+
   // CRITICAL FIX: Check and start transfer when conditions are met
   const checkAndStartTransfer = useCallback(() => {
     if (
@@ -229,7 +360,7 @@ export default function SendPage() {
       transferStartedRef.current = true;
       startTransfer(filesRef.current);
     }
-  }, []);
+  }, [startTransfer]);
 
   const handleFiles = (selectedFiles: File[]) => {
     if (selectedFiles.length === 0) return;
@@ -558,137 +689,6 @@ export default function SendPage() {
     }
   };
 
-  const startTransfer = async (selectedFiles: File[]) => {
-    if (!selectedFiles.length) {
-      setError(
-        "No files selected. Please select at least one file or folder to send."
-      );
-      setStep("select");
-      return;
-    }
-
-    console.log("[SendPage] startTransfer called", {
-      selectedFiles,
-      rtcRef: rtcRef.current,
-    });
-
-    if (!rtcRef.current) {
-      setError("Connection not established. Please try again.");
-      setStep("select");
-      return;
-    }
-
-    if (!sharedSecretRef.current) {
-      setError(
-        "Encryption handshake not complete. Please wait for the connection to establish before sending files."
-      );
-      return;
-    }
-
-    // Calculate debug info for each file
-    Promise.all(
-      selectedFiles.map(async (file) => {
-        const arrayBuffer = await file.arrayBuffer();
-        const hashBuffer = await window.crypto.subtle.digest(
-          "SHA-256",
-          arrayBuffer
-        );
-        const hashB64 = btoa(
-          String.fromCharCode(...new Uint8Array(hashBuffer))
-        );
-        const hex = Array.from(new Uint8Array(arrayBuffer).slice(0, 16))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join(" ");
-        return {
-          hash: hashB64,
-          type: file.type,
-          size: file.size,
-          hex,
-        };
-      })
-    ).then((info) => {
-      if (isMountedRef.current) setFileDebugInfo(info);
-    });
-
-    if (isMountedRef.current) setStep("transferring");
-
-    const transfer = new FileTransferSender(
-      (data) => {
-        console.log("[SendPage] rtc.send called, bytes:", data.byteLength);
-        return rtcRef.current!.send(data);
-      },
-      () => rtcRef.current!.getBufferedAmount(),
-      () => rtcRef.current!.getDataChannelState()
-    );
-
-    transfer.setEncryptionKey(sharedSecretRef.current);
-    transferRef.current = transfer;
-
-    transfer.onProgress = (prog) => {
-      if (!isMountedRef.current) return;
-
-      const fileIdx = transfer.fileIndex;
-      setProgressList((prev) => {
-        const updated = [...prev];
-        updated[fileIdx] = prog.percentage;
-        return updated;
-      });
-      setSpeedList((prev) => {
-        const updated = [...prev];
-        updated[fileIdx] = prog.speed;
-        return updated;
-      });
-      setTimeRemainingList((prev) => {
-        const updated = [...prev];
-        updated[fileIdx] = prog.timeRemaining;
-        return updated;
-      });
-    };
-
-    transfer.onComplete = () => {
-      console.log("[SendPage] transfer.onComplete called");
-
-      if (!isMountedRef.current) return;
-
-      // CRITICAL FIX: Mark transfer as complete
-      transferCompleteRef.current = true;
-      filesSuccessfullySentRef.current = true;
-
-      setProgressList((prev) => prev.map(() => 100));
-      setStep("complete");
-
-      // Clear keys after transfer
-      ecdhKeyPairRef.current = null;
-      peerPublicKeyRef.current = null;
-      sharedSecretRef.current = null;
-    };
-
-    transfer.onError = (err) => {
-      console.log("[SendPage] transfer.onError called", err);
-
-      if (!isMountedRef.current) return;
-
-      // CRITICAL FIX: Don't show errors if transfer complete
-      if (transferCompleteRef.current || filesSuccessfullySentRef.current) {
-        console.log("[SendPage] Ignoring error after transfer complete:", err);
-        return;
-      }
-
-      setError(err.message);
-      setErrorLog((prev) => [
-        ...prev,
-        `[${new Date().toLocaleTimeString()}] ${err.message}`,
-      ]);
-
-      // Clear keys on error
-      ecdhKeyPairRef.current = null;
-      peerPublicKeyRef.current = null;
-      sharedSecretRef.current = null;
-    };
-
-    await transfer.startBatchTransfer(selectedFiles);
-  };
-
   const copyCode = () => {
     navigator.clipboard.writeText(sessionCode);
     setCopyStatus("code");
@@ -786,473 +786,506 @@ export default function SendPage() {
   };
 
   // FULL INTEGRATION - Replace your entire return statement with this:
-return (
-  <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-    {/* Header */}
-    <header className="border-b bg-white/60 backdrop-blur-md shadow-sm sticky top-0 z-20">
-      <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900"
-        >
-          <ArrowLeft className="w-5 h-5" />
-          <span>Back</span>
-        </Link>
-        <div className="flex items-center gap-2">
-          {isOffline && (
-            <span className="text-red-600 font-semibold flex items-center gap-1">
-              <Wifi className="w-4 h-4" />
-              Offline
-            </span>
-          )}
+  return (
+    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
+      {/* Header */}
+      <header className="border-b bg-white/60 backdrop-blur-md shadow-sm sticky top-0 z-20">
+        <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            <span>Back</span>
+          </Link>
+          <div className="flex items-center gap-2">
+            {isOffline && (
+              <span className="text-red-600 font-semibold flex items-center gap-1">
+                <Wifi className="w-4 h-4" />
+                Offline
+              </span>
+            )}
+          </div>
         </div>
-      </div>
-    </header>
+      </header>
 
-    {/* Main Content */}
-    <main className="container mx-auto px-2 py-8 sm:px-4 sm:py-16 pb-32">
-      <div className="max-w-2xl mx-auto">
-        {/* Error Messages */}
-        {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow">
-            <div className="font-bold text-lg mb-1">{error}</div>
-            {filesRef.current.length > 0 &&
-              files.length > 0 &&
-              !transferCompleteRef.current && (
-                <button
-                  onClick={handleRetry}
-                  className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
-                >
-                  Retry
-                </button>
-              )}
-          </div>
-        )}
-
-        {/* Resume Banner */}
-        {resumeAvailable && (
-          <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
-            <div className="font-semibold mb-2">Transfer interrupted</div>
-            <button
-              onClick={handleResume}
-              disabled={resumeInProgress}
-              className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
-            >
-              {resumeInProgress ? "Resuming..." : "Resume Transfer"}
-            </button>
-          </div>
-        )}
-
-        {/* SELECT STEP */}
-        {step === "select" && (
-          <div className="bg-white rounded-2xl shadow-2xl p-4 sm:p-8">
-            <div className="text-center mb-8">
-              <div className="w-20 h-20 bg-gradient-to-br from-blue-200 via-blue-100 to-purple-200 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <Upload className="w-12 h-12 text-blue-600" />
-              </div>
-              <h2 className="text-3xl font-extrabold text-gray-900 mb-2 tracking-tight">
-                Send Files
-              </h2>
-              <p className="text-gray-600 text-base">
-                Choose files or folders to share instantly
-              </p>
-            </div>
-
-            {/* Send as ZIP Option */}
-            <div className="flex items-center gap-2 mb-4">
-              <input
-                id="sendAsZip"
-                type="checkbox"
-                checked={sendAsZip}
-                onChange={(e) => setSendAsZip(e.target.checked)}
-                className="accent-blue-600"
-              />
-              <label htmlFor="sendAsZip" className="text-sm text-gray-700 cursor-pointer">
-                <span className="font-semibold">Send as ZIP</span>
-              </label>
-            </div>
-
-            {/* File Selection Buttons */}
-            <div className="flex flex-col sm:flex-row gap-4 mb-4">
-              <label className="block flex-1">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  onChange={handleFileSelect}
-                  className="hidden"
-                />
-                <button
-                  type="button"
-                  className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Upload className="w-5 h-5 mr-2 inline-block" />
-                  {files.length > 0 ? "Add More Files" : "Select Files"}
-                </button>
-              </label>
-              
-              <label className="block flex-1">
-                <input
-                  type="file"
-                  multiple
-                  onChange={handleFileSelect}
-                  className="hidden"
-                  ref={(el) => {
-                    if (el) {
-                      el.setAttribute("webkitdirectory", "");
-                      el.setAttribute("directory", "");
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold shadow"
-                  onClick={(e) => {
-                    const input = e.currentTarget.parentElement?.querySelector('input[type="file"]') as HTMLInputElement;
-                    input?.click();
-                  }}
-                >
-                  <Upload className="w-5 h-5 mr-2 inline-block" />
-                  {files.length > 0 ? "Add Folder" : "Select Folder"}
-                </button>
-              </label>
-            </div>
-
-            {/* Drag & Drop Zone */}
-            <div
-              className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors ${
-                isDragActive
-                  ? "border-blue-500 bg-blue-100 shadow-lg"
-                  : "border-gray-300 hover:border-blue-500 hover:bg-blue-50"
-              }`}
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-            >
-              <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
-              <p className="text-lg text-gray-700 mb-2 font-semibold">
-                {files.length > 0
-                  ? "Add more files or folders"
-                  : "Drag files or folders here"}
-              </p>
-              <p className="text-sm text-gray-500">
-                Any file up to 2GB each
-              </p>
-            </div>
-
-            {/* Selected Files Grid */}
-            {files.length > 0 && (
-              <>
-                <div className="mt-6 flex justify-between items-center mb-2">
-                  <h3 className="text-lg font-bold text-gray-900">
-                    Selected Files{" "}
-                    <span className="text-blue-600">({files.length})</span>
-                  </h3>
+      {/* Main Content */}
+      <main className="container mx-auto px-2 py-8 sm:px-4 sm:py-16 pb-32">
+        <div className="max-w-2xl mx-auto">
+          {/* Error Messages */}
+          {error && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow">
+              <div className="font-bold text-lg mb-1">{error}</div>
+              {filesRef.current.length > 0 &&
+                files.length > 0 &&
+                !transferCompleteRef.current && (
                   <button
-                    onClick={removeAllFiles}
-                    className="text-sm text-red-600 hover:text-red-700 font-semibold px-3 py-1 rounded border border-red-300 hover:bg-red-50 transition shadow"
+                    onClick={handleRetry}
+                    className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
                   >
-                    Remove All
+                    Retry
                   </button>
-                </div>
-                <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  {files.map((f, idx) => {
-                    const isImage = f.type.startsWith("image/");
-                    const isVideo = f.type.startsWith("video/");
-                    const isAudio = f.type.startsWith("audio/");
-                    
-                    return (
-                      <div
-                        key={f.name + f.size + idx}
-                        className="bg-gradient-to-br from-gray-50 to-blue-50 rounded-lg p-4 flex flex-col items-center shadow relative border border-gray-200 hover:shadow-lg transition-all"
-                      >
-                        <button
-                          onClick={() => removeFile(idx)}
-                          className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600 transition text-xs font-bold shadow"
-                          aria-label="Remove file"
-                        >
-                          ×
-                        </button>
-                        
-                        {/* Image Preview */}
-                        {isImage ? (
-                          <img
-                            src={URL.createObjectURL(f)}
-                            alt={f.name}
-                            className="w-20 h-20 object-cover rounded mb-2 border shadow"
-                            loading="lazy"
-                            onLoad={(e) =>
-                              URL.revokeObjectURL(
-                                (e.target as HTMLImageElement).src
-                              )
-                            }
-                          />
-                        ) : isVideo ? (
-                          <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-2xl">🎬</span>
-                          </div>
-                        ) : isAudio ? (
-                          <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-2xl">🎵</span>
-                          </div>
-                        ) : (
-                          <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                            <span className="text-xs text-gray-500">
-                              📄 {f.type ? f.type.split("/")[1]?.toUpperCase() : "File"}
-                            </span>
-                          </div>
-                        )}
-                        
-                        <span className="font-medium text-gray-900 break-all text-center text-sm mb-1 line-clamp-2">
-                          {f.name}
-                        </span>
-                        <span className="text-xs text-gray-600">
-                          {formatBytes(f.size)}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* WAITING STEP */}
-        {step === "waiting" && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
-            <div className="text-center mb-8">
-              <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce-slow">
-                <Wifi className="w-10 h-10 text-blue-600 animate-pulse" />
-              </div>
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">
-                Share This Code
-              </h2>
-              <p className="text-gray-600">
-                Waiting for receiver to join...
-              </p>
+                )}
             </div>
+          )}
 
-            {/* Show selected files preview */}
-            {files.length > 0 && (
-              <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                <p className="text-sm text-gray-500 mb-2">Selected files:</p>
-                <ul className="space-y-1 max-h-40 overflow-y-auto">
-                  {files.map((f, idx) => (
-                    <li
-                      key={f.name + f.size + idx}
-                      className="flex justify-between items-center text-sm"
-                    >
-                      <span className="font-semibold text-gray-900 truncate flex-1 mr-2">
-                        {f.name}
-                      </span>
-                      <span className="text-xs text-gray-600 whitespace-nowrap">
-                        {formatBytes(f.size)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="mt-2 pt-2 border-t border-gray-200">
-                  <span className="text-xs text-gray-600">
-                    Total: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
-                  </span>
+          {/* Resume Banner */}
+          {resumeAvailable && (
+            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
+              <div className="font-semibold mb-2">Transfer interrupted</div>
+              <button
+                onClick={handleResume}
+                disabled={resumeInProgress}
+                className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
+              >
+                {resumeInProgress ? "Resuming..." : "Resume Transfer"}
+              </button>
+            </div>
+          )}
+
+          {/* SELECT STEP */}
+          {step === "select" && (
+            <div className="bg-white rounded-2xl shadow-2xl p-4 sm:p-8">
+              <div className="text-center mb-8">
+                <div className="w-20 h-20 bg-linear-to-br from-blue-200 via-blue-100 to-purple-200 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
+                  <Upload className="w-12 h-12 text-blue-600" />
+                </div>
+                <h2 className="text-3xl font-extrabold text-gray-900 mb-2 tracking-tight">
+                  Send Files
+                </h2>
+                <p className="text-gray-600 text-base">
+                  Choose files or folders to share instantly
+                </p>
+              </div>
+
+              {/* Send as ZIP Option */}
+              <div className="flex flex-col gap-1 mb-4">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="sendAsZip"
+                    type="checkbox"
+                    checked={sendAsZip}
+                    onChange={(e) => setSendAsZip(e.target.checked)}
+                    className="accent-blue-600"
+                  />
+                  <label
+                    htmlFor="sendAsZip"
+                    className="text-sm text-gray-700 cursor-pointer"
+                  >
+                    <span className="font-semibold">Send as ZIP</span>
+                  </label>
+                </div>
+                <div className="text-xs text-gray-500 ml-6">
+                  For better folder structure, you can choose ZIP.
                 </div>
               </div>
-            )}
 
-            <div className="bg-blue-50 rounded-xl p-4 sm:p-6 mb-6 flex flex-col items-center w-full max-w-xs sm:max-w-md mx-auto">
-              <p className="text-sm text-gray-600 mb-2 text-center">Transfer Code</p>
-              <div className="text-5xl sm:text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 select-all">
-                {sessionCode || "------"}
+              {/* File Selection Buttons */}
+              <div className="flex flex-col sm:flex-row gap-4 mb-4">
+                <label className="block flex-1">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Upload className="w-5 h-5 mr-2 inline-block" />
+                    {files.length > 0 ? "Add More Files" : "Select Files"}
+                  </button>
+                </label>
+
+                <label className="block flex-1">
+                  <input
+                    type="file"
+                    multiple
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    ref={(el) => {
+                      if (el) {
+                        el.setAttribute("webkitdirectory", "");
+                        el.setAttribute("directory", "");
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold shadow"
+                    onClick={(e) => {
+                      const input =
+                        e.currentTarget.parentElement?.querySelector(
+                          'input[type="file"]'
+                        ) as HTMLInputElement;
+                      input?.click();
+                    }}
+                  >
+                    <Upload className="w-5 h-5 mr-2 inline-block" />
+                    {files.length > 0 ? "Add Folder" : "Select Folder"}
+                  </button>
+                </label>
               </div>
-              {sessionCode && (
+
+              {/* Drag & Drop Zone */}
+              <div
+                className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors ${
+                  isDragActive
+                    ? "border-blue-500 bg-blue-100 shadow-lg"
+                    : "border-gray-300 hover:border-blue-500 hover:bg-blue-50"
+                }`}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+              >
+                <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
+                <p className="text-lg text-gray-700 mb-2 font-semibold">
+                  {files.length > 0
+                    ? "Add more files or folders"
+                    : "Drag files or folders here"}
+                </p>
+                <p className="text-sm text-gray-500">Any file up to 2GB each</p>
+              </div>
+
+              {/* Selected Files Grid */}
+              {files.length > 0 && (
                 <>
-                  <div className="mb-4 flex flex-col items-center w-full">
-                    <div className="w-full flex justify-center">
-                      <QRCode
-                        value={`${typeof window !== "undefined" ? window.location.origin : ""}/receive?code=${sessionCode}`}
-                        size={typeof window !== "undefined" && window.innerWidth < 400 ? 180 : 220}
-                        style={{
-                          width: "100%",
-                          height: "auto",
-                          maxWidth: 220,
-                          minWidth: 120,
-                        }}
-                      />
-                    </div>
-                    <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">
-                      {`${typeof window !== "undefined" ? window.location.origin : ""}/receive?code=${sessionCode}`}
-                    </div>
-                  </div>
-                  <div className="flex flex-col sm:flex-row gap-2 w-full mb-4">
+                  <div className="mt-6 flex justify-between items-center mb-2">
+                    <h3 className="text-lg font-bold text-gray-900">
+                      Selected Files{" "}
+                      <span className="text-blue-600">({files.length})</span>
+                    </h3>
                     <button
-                      onClick={copyCode}
-                      className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                      onClick={removeAllFiles}
+                      className="text-sm text-red-600 hover:text-red-700 font-semibold px-3 py-1 rounded border border-red-300 hover:bg-red-50 transition shadow"
                     >
-                      {copyStatus === "code" ? (
-                        <>
-                          <Check className="w-5 h-5" />
-                          Code Copied!
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-5 h-5" />
-                          Copy Code
-                        </>
-                      )}
+                      Remove All
                     </button>
                   </div>
-                  <div className="flex flex-col sm:flex-row gap-2 w-full">
-                    <button
-                      onClick={copyLink}
-                      className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
-                    >
-                      {copyStatus === "link" ? (
-                        <>
-                          <Check className="w-5 h-5" />
-                          Link Copied!
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-5 h-5" />
-                          Copy Link
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => {
-                        const url = `${typeof window !== "undefined" ? window.location.origin : ""}/receive?code=${sessionCode}`;
-                        if (navigator.share) {
-                          navigator.share({
-                            title: "FluxDrop Session",
-                            text: "Join my FluxDrop session:",
-                            url,
-                          });
-                        } else {
-                          copyLink();
-                        }
-                      }}
-                      className="flex-1 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
-                    >
-                      <svg
-                        className="w-5 h-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
-                        />
-                      </svg>
-                      Share Link
-                    </button>
+                  <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-4">
+                    {files.map((f, idx) => {
+                      const isImage = f.type.startsWith("image/");
+                      const isVideo = f.type.startsWith("video/");
+                      const isAudio = f.type.startsWith("audio/");
+
+                      return (
+                        <div
+                          key={f.name + f.size + idx}
+                          className="bg-linear-to-br from-gray-50 to-blue-50 rounded-lg p-4 flex flex-col items-center shadow relative border border-gray-200 hover:shadow-lg transition-all"
+                        >
+                          <button
+                            onClick={() => removeFile(idx)}
+                            className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600 transition text-xs font-bold shadow"
+                            aria-label="Remove file"
+                          >
+                            ×
+                          </button>
+
+                          {/* Image Preview */}
+                          {isImage ? (
+                            <img
+                              src={URL.createObjectURL(f)}
+                              alt={f.name}
+                              className="w-20 h-20 object-cover rounded mb-2 border shadow"
+                              loading="lazy"
+                              onLoad={(e) =>
+                                URL.revokeObjectURL(
+                                  (e.target as HTMLImageElement).src
+                                )
+                              }
+                            />
+                          ) : isVideo ? (
+                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-2xl">🎬</span>
+                            </div>
+                          ) : isAudio ? (
+                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-2xl">🎵</span>
+                            </div>
+                          ) : (
+                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
+                              <span className="text-xs text-gray-500">
+                                📄{" "}
+                                {f.type
+                                  ? f.type.split("/")[1]?.toUpperCase()
+                                  : "File"}
+                              </span>
+                            </div>
+                          )}
+
+                          <span className="font-medium text-gray-900 break-all text-center text-sm mb-1 line-clamp-2">
+                            {f.name}
+                          </span>
+                          <span className="text-xs text-gray-600">
+                            {formatBytes(f.size)}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </>
               )}
             </div>
+          )}
 
-            <p className="text-center text-sm text-gray-500">
-              Code expires in 5 minutes
-            </p>
-          </div>
-        )}
+          {/* WAITING STEP */}
+          {step === "waiting" && (
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
+              <div className="text-center mb-8">
+                <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce-slow">
+                  <Wifi className="w-10 h-10 text-blue-600 animate-pulse" />
+                </div>
+                <h2 className="text-3xl font-bold text-gray-900 mb-2">
+                  Share This Code
+                </h2>
+                <p className="text-gray-600">Waiting for receiver to join...</p>
+              </div>
 
-        {/* CONNECTED STEP */}
-        {step === "connected" && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
-            <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Check className="w-10 h-10 text-green-600" />
-            </div>
-            <h2 className="text-3xl font-bold text-gray-900 mb-2">
-              Connected!
-            </h2>
-            <p className="text-gray-600">Establishing secure connection...</p>
-          </div>
-        )}
-
-        {/* TRANSFERRING STEP */}
-        {step === "transferring" && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
-            <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">
-              Sending Files
-            </h2>
-            <div className="space-y-4">
-              {files.map((f, idx) => (
-                <div key={f.name + f.size} className="bg-gray-50 rounded-lg p-4">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="font-semibold text-gray-900 break-all">
-                      {f.name}
+              {/* Show selected files preview */}
+              {files.length > 0 && (
+                <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                  <p className="text-sm text-gray-500 mb-2">Selected files:</p>
+                  <ul className="space-y-1 max-h-40 overflow-y-auto">
+                    {files.map((f, idx) => (
+                      <li
+                        key={f.name + f.size + idx}
+                        className="flex justify-between items-center text-sm"
+                      >
+                        <span className="font-semibold text-gray-900 truncate flex-1 mr-2">
+                          {f.name}
+                        </span>
+                        <span className="text-xs text-gray-600 whitespace-nowrap">
+                          {formatBytes(f.size)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-2 pt-2 border-t border-gray-200">
+                    <span className="text-xs text-gray-600">
+                      Total:{" "}
+                      {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
                     </span>
-                    <span className="text-sm text-gray-600">
-                      {formatBytes(f.size)}
-                    </span>
-                  </div>
-                  <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-600 transition-all"
-                      style={{ width: `${progressList[idx] || 0}%` }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-xs text-gray-500 mt-1">
-                    <span>{Math.round(progressList[idx] || 0)}%</span>
-                    <span>{formatSpeed(speedList[idx] || 0)}</span>
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
+              )}
 
-        {/* COMPLETE STEP */}
-        {step === "complete" && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
-            <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Check className="w-10 h-10 text-green-600" />
+              <div className="bg-blue-50 rounded-xl p-4 sm:p-6 mb-6 flex flex-col items-center w-full max-w-xs sm:max-w-md mx-auto">
+                <p className="text-sm text-gray-600 mb-2 text-center">
+                  Transfer Code
+                </p>
+                <div className="text-5xl sm:text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 select-all">
+                  {sessionCode || "------"}
+                </div>
+                {sessionCode && (
+                  <>
+                    <div className="mb-4 flex flex-col items-center w-full">
+                      <div className="w-full flex justify-center">
+                        <QRCode
+                          value={`${
+                            typeof window !== "undefined"
+                              ? window.location.origin
+                              : ""
+                          }/receive?code=${sessionCode}`}
+                          size={
+                            typeof window !== "undefined" &&
+                            window.innerWidth < 400
+                              ? 180
+                              : 220
+                          }
+                          style={{
+                            width: "100%",
+                            height: "auto",
+                            maxWidth: 220,
+                            minWidth: 120,
+                          }}
+                        />
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">
+                        {`${
+                          typeof window !== "undefined"
+                            ? window.location.origin
+                            : ""
+                        }/receive?code=${sessionCode}`}
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full mb-4">
+                      <button
+                        onClick={copyCode}
+                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                      >
+                        {copyStatus === "code" ? (
+                          <>
+                            <Check className="w-5 h-5" />
+                            Code Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-5 h-5" />
+                            Copy Code
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full">
+                      <button
+                        onClick={copyLink}
+                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                      >
+                        {copyStatus === "link" ? (
+                          <>
+                            <Check className="w-5 h-5" />
+                            Link Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-5 h-5" />
+                            Copy Link
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => {
+                          const url = `${
+                            typeof window !== "undefined"
+                              ? window.location.origin
+                              : ""
+                          }/receive?code=${sessionCode}`;
+                          if (navigator.share) {
+                            navigator.share({
+                              title: "FluxDrop Session",
+                              text: "Join my FluxDrop session:",
+                              url,
+                            });
+                          } else {
+                            copyLink();
+                          }
+                        }}
+                        className="flex-1 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                      >
+                        <svg
+                          className="w-5 h-5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
+                          />
+                        </svg>
+                        Share Link
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <p className="text-center text-sm text-gray-500">
+                Code expires in 5 minutes
+              </p>
             </div>
-            <h2 className="text-3xl font-bold text-gray-900 mb-2">
-              Transfer Complete!
-            </h2>
-            <p className="text-gray-600 mb-6">
-              Your files were sent successfully
-            </p>
+          )}
+
+          {/* CONNECTED STEP */}
+          {step === "connected" && (
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
+              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Check className="w-10 h-10 text-green-600" />
+              </div>
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">
+                Connected!
+              </h2>
+              <p className="text-gray-600">Establishing secure connection...</p>
+            </div>
+          )}
+
+          {/* TRANSFERRING STEP */}
+          {step === "transferring" && (
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
+              <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">
+                Sending Files
+              </h2>
+              <div className="space-y-4">
+                {files.map((f, idx) => (
+                  <div
+                    key={f.name + f.size}
+                    className="bg-gray-50 rounded-lg p-4"
+                  >
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="font-semibold text-gray-900 break-all">
+                        {f.name}
+                      </span>
+                      <span className="text-sm text-gray-600">
+                        {formatBytes(f.size)}
+                      </span>
+                    </div>
+                    <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-600 transition-all"
+                        style={{ width: `${progressList[idx] || 0}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                      <span>{Math.round(progressList[idx] || 0)}%</span>
+                      <span>{formatSpeed(speedList[idx] || 0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* COMPLETE STEP */}
+          {step === "complete" && (
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
+              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Check className="w-10 h-10 text-green-600" />
+              </div>
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">
+                Transfer Complete!
+              </h2>
+              <p className="text-gray-600 mb-6">
+                Your files were sent successfully
+              </p>
+              <button
+                onClick={reset}
+                className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+              >
+                Send More Files
+              </button>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* FLOATING ACTION BAR */}
+      {files.length > 0 && step === "select" && (
+        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t shadow-lg animate-slide-up">
+          <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+            <div className="text-sm flex-1 min-w-0">
+              <span className="font-semibold text-gray-900">
+                {files.length} {files.length === 1 ? "file" : "files"}
+              </span>
+              <span className="text-gray-500 ml-2 truncate">
+                {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
+              </span>
+            </div>
             <button
-              onClick={reset}
-              className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+              onClick={handleSend}
+              disabled={!readyToSend}
+              className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed shadow-lg flex items-center gap-2 whitespace-nowrap"
             >
-              Send More Files
+              <Upload className="w-5 h-5" />
+              Send
             </button>
           </div>
-        )}
-      </div>
-    </main>
-
-    {/* FLOATING ACTION BAR */}
-    {files.length > 0 && step === "select" && (
-      <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t shadow-lg animate-slide-up">
-        <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
-          <div className="text-sm flex-1 min-w-0">
-            <span className="font-semibold text-gray-900">
-              {files.length} {files.length === 1 ? "file" : "files"}
-            </span>
-            <span className="text-gray-500 ml-2 truncate">
-              {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
-            </span>
-          </div>
-          <button
-            onClick={handleSend}
-            disabled={!readyToSend}
-            className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed shadow-lg flex items-center gap-2 whitespace-nowrap"
-          >
-            <Upload className="w-5 h-5" />
-            Send
-          </button>
         </div>
-      </div>
-    )}
-  </div>
-);
+      )}
+    </div>
+  );
 }
