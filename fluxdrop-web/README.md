@@ -154,5 +154,5 @@ npm run dev
 - GitHub: https://github.com/yourusername/fluxdrop
 
 ---
-
+ 
 **Philosophy:** Be the best at one thing—instant, private file transfer.
