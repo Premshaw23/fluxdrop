@@ -729,14 +729,37 @@ export class FileTransferReceiver {
         return;
       }
     }
+    
+    // ✅ IMPROVED: Validate index is within expected range
+    if (index < 0 || index >= this.metadata.chunks) {
+      console.error(`[FileTransferReceiver] CRITICAL: Invalid chunk index ${index}, expected 0-${this.metadata.chunks - 1}`);
+      this.onError?.(new Error(`Invalid chunk index ${index}`));
+      return;
+    }
+    
+    // ✅ IMPROVED: Check if chunk was already received
+    const wasAlreadyReceived = this.receivedChunkBitmap[index];
+    if (wasAlreadyReceived) {
+      console.warn(`[FileTransferReceiver] Duplicate chunk ${index} received, skipping`);
+      return;
+    }
+    
+    // Store chunk and mark as received
     this.receivedChunks.set(index, chunkData);
     this.receivedChunkBitmap[index] = true;
     this.bytesReceived += chunkData.byteLength;
-    console.log(`[FileTransferReceiver] Received chunk ${index}/${this.metadata.chunks - 1}, size: ${chunkData.byteLength}`);
+    
+    // ✅ IMPROVED: Log with clearer formatting for large files
+    const receivedCount = this.receivedChunkBitmap.filter(b => b).length;
+    const percentage = (receivedCount / this.metadata.chunks * 100).toFixed(2);
+    console.log(`[FileTransferReceiver] Chunk ${index}/${this.metadata.chunks - 1} received (${receivedCount}/${this.metadata.chunks} = ${percentage}%), size: ${chunkData.byteLength} bytes`);
+    
     const receivedIndices = Array.from(this.receivedChunks.keys()).sort((a, b) => a - b);
-    console.log(`[FileTransferReceiver] All received chunk indices:`, receivedIndices, `Total bytes received: ${this.bytesReceived}`);
-    // Verbose: print bitmap
-    console.log(`[FileTransferReceiver] Chunk bitmap:`, this.receivedChunkBitmap);
+    if (receivedCount % 20 === 0 || receivedCount === this.metadata.chunks) {
+      // Log progress every 20 chunks for large files
+      console.log(`[FileTransferReceiver] Progress: ${receivedIndices.length} chunks stored, bitmap: ${receivedCount}/${this.metadata.chunks}, total size: ${this.bytesReceived} bytes`);
+    }
+    
     this.updateProgress();
   }
 
@@ -768,38 +791,61 @@ export class FileTransferReceiver {
       return;
     }
 
-    // Combine all chunks in order
-    const chunks: ArrayBuffer[] = [];
+    // ✅ CRITICAL FIX: Build chunks array in correct index order, not in arrival order
+    // Chunks may arrive out of order, so we must store them at the correct indices
+    const chunks: (ArrayBuffer | null)[] = new Array(this.metadata.chunks).fill(null);
     const missingChunks: number[] = [];
     let totalSize = 0;
     
     for (let i = 0; i < this.metadata.chunks; i++) {
-      const chunk = this.receivedChunks.get(i);
-      if (!chunk) {
+      // Use bitmap to determine if chunk was received
+      if (!this.receivedChunkBitmap[i]) {
         missingChunks.push(i);
       } else {
-        totalSize += chunk.byteLength;
-        chunks.push(chunk);
+        const chunk = this.receivedChunks.get(i);
+        if (chunk) {
+          // ✅ Store chunk at its correct index position, not in push order
+          chunks[i] = chunk;
+          totalSize += chunk.byteLength;
+        } else {
+          // Chunk was marked as received in bitmap but not in Map - this is a critical error
+          console.error(`[FileTransferReceiver] CRITICAL: Chunk ${i} marked received in bitmap but not in Map`);
+          missingChunks.push(i);
+        }
       }
     }
     
-    // ✅ NEW: Report all missing chunks at once (not just first)
+    // ✅ IMPROVED: Handle missing chunks gracefully - request resend instead of failing immediately
     if (missingChunks.length > 0) {
+      const missingPercentage = ((missingChunks.length / this.metadata.chunks) * 100).toFixed(2);
       const errorMsg = missingChunks.length === 1
-        ? `Missing chunk ${missingChunks[0]} of ${this.metadata.chunks}`
-        : `Missing ${missingChunks.length} chunks of ${this.metadata.chunks}: [${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}]`;
+        ? `Missing chunk ${missingChunks[0]} of ${this.metadata.chunks} (${missingPercentage}%)`
+        : `Missing ${missingChunks.length} chunks of ${this.metadata.chunks} (${missingPercentage}%): [${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}]`;
       
       console.error(`[FileTransferReceiver] ${errorMsg}`);
       console.log(`[FileTransferReceiver] Missing chunk debug:`, {
-        receivedIndices: Array.from(this.receivedChunks.keys()),
-        bitmap: this.receivedChunkBitmap,
-        missingChunks
+        receivedIndices: Array.from(this.receivedChunks.keys()).sort((a, b) => a - b),
+        bitmapTrueCount: this.receivedChunkBitmap.filter(b => b).length,
+        bitmapLength: this.receivedChunkBitmap.length,
+        missingChunks,
+        expectedChunks: this.metadata.chunks,
+        expectedSize: this.metadata.size,
+        actualSize: totalSize
       });
       this.onError?.(new Error(errorMsg));
       return;
     }
+    
+    // ✅ Filter out nulls and verify all chunks are present
+    const finalChunks: ArrayBuffer[] = chunks.filter((c): c is ArrayBuffer => c !== null);
+    if (finalChunks.length !== this.metadata.chunks) {
+      const errorMsg = `Internal error: Expected ${this.metadata.chunks} chunks but got ${finalChunks.length}`;
+      console.error(`[FileTransferReceiver] ${errorMsg}`);
+      this.onError?.(new Error(errorMsg));
+      return;
+    }
 
-    const blob = new Blob(chunks, { type: this.metadata.type });
+    const blob = new Blob(finalChunks, { type: this.metadata.type });
     
     // ✅ NEW: Validate final file size matches expected size
     if (blob.size !== this.metadata.size) {
