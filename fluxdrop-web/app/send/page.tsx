@@ -553,6 +553,10 @@ export default function SendPage() {
           dataChannelReadyRef.current = true;
           checkAndStartTransfer();
         },
+        onMessage: (data) => {
+          // ✅ NEW: Handle acknowledgments from receiver
+          transferRef.current?.handleMessage(data);
+        },
         onError: (err) => {
           if (!isMountedRef.current) return;
 

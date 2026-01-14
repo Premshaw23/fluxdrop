@@ -223,6 +223,29 @@ export default function ReceivePage() {
         const transfer = new FileTransferReceiver();
         transfer.setDecryptionKey(sharedSecretRef.current);
         transferRef.current = transfer;
+        
+        // ✅ NEW: Setup callback to send control messages back to sender
+        transfer.setSendControlMessage((msg) => {
+          // Serialize and send the control message
+          const encoder = new TextEncoder();
+          const headerObj: any = { type: msg.type };
+          if (msg.chunkIndex !== undefined) headerObj.chunkIndex = msg.chunkIndex;
+          if (msg.missingChunks) headerObj.missingChunks = msg.missingChunks;
+          
+          const json = JSON.stringify(headerObj);
+          const header = encoder.encode(json);
+          
+          const headerLengthBuffer = new ArrayBuffer(4);
+          const headerLengthView = new DataView(headerLengthBuffer);
+          headerLengthView.setUint32(0, header.length, true);
+          
+          const combined = new Uint8Array(4 + header.length);
+          combined.set(new Uint8Array(headerLengthBuffer), 0);
+          combined.set(header, 4);
+          
+          console.log(`[ReceivePage] Sending control message: ${msg.type}`);
+          rtcRef.current?.send(combined);
+        });
 
         // Batch metadata handler
         transfer.onBatchMetadata = (batch) => {

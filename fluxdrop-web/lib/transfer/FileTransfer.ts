@@ -25,7 +25,7 @@ export interface TransferProgress {
 }
 
 interface ChunkMessage {
-  type: 'batch-metadata' | 'metadata' | 'chunk' | 'complete' | 'resume-request';
+  type: 'batch-metadata' | 'metadata' | 'chunk' | 'complete' | 'resume-request' | 'chunk-ack' | 'ack-all';
   missingChunks?: number[];
   batchMetadata?: BatchMetadata;
   metadata?: FileMetadata;
@@ -96,6 +96,8 @@ export class FileTransferSender {
               }
             private chunkBuffer: Array<ArrayBuffer | null> = [];
             private maxBufferedChunks: number = 10; // Only buffer 10 chunks at a time
+            private acknowledgedChunks: Set<number> = new Set(); // Track acknowledged chunks
+            private ackWaitTimeout: NodeJS.Timeout | null = null; // Timeout for waiting for acks
           /**
            * Set chunk size for optimization (in bytes)
            */
@@ -216,6 +218,7 @@ export class FileTransferSender {
       this.bytesSent = 0;
       this.startTime = Date.now();
       this.sentChunkBitmap = new Array(this.chunks.length).fill(false);
+      this.acknowledgedChunks.clear(); // ✅ Reset acknowledged chunks for new file
       // Preload chunk buffers for current file
       this.chunkBuffer = new Array(this.chunks.length).fill(null);
       // Preload only the first N chunks
@@ -260,6 +263,43 @@ export class FileTransferSender {
   public getErrorLog(): string[] {
     return [...this.errorLog];
   }
+  
+  /**
+   * Handle chunk acknowledgment from receiver
+   */
+  public handleChunkAck(chunkIndex: number) {
+    this.acknowledgedChunks.add(chunkIndex);
+  }
+  
+  /**
+   * Handle all-chunks-acked message from receiver
+   */
+  public handleAckAll() {
+    if (this.chunks) {
+      for (let i = 0; i < this.chunks.length; i++) {
+        this.acknowledgedChunks.add(i);
+      }
+    }
+  }
+  
+  /**
+   * Handle incoming control messages (acks, etc.)
+   */
+  public handleMessage(data: ArrayBuffer) {
+    const view = new DataView(data);
+    const headerLength = view.getUint32(0, true);
+    const headerBytes = new Uint8Array(data, 4, headerLength);
+    const decoder = new TextDecoder();
+    const headerJson = decoder.decode(headerBytes);
+    const header = JSON.parse(headerJson);
+    
+    if (header.type === 'chunk-ack') {
+      this.handleChunkAck(header.chunkIndex);
+    } else if (header.type === 'ack-all') {
+      this.handleAckAll();
+    }
+  }
+  
   private sentChunkBitmap: boolean[] = [];
     /**
      * Serialize current transfer state for reconnect/resume
@@ -383,9 +423,42 @@ export class FileTransferSender {
     }
 
     if (this.currentChunk >= this.chunks.length) {
+      // ✅ FIX: Wait for all chunks to be acknowledged before sending complete
+      if (!this.chunks) {
+        this.onError?.(new Error('No chunks available'));
+        return;
+      }
+      
+      // Check if all chunks have been acknowledged
+      let allAcknowledged = true;
+      for (let i = 0; i < this.chunks.length; i++) {
+        if (!this.acknowledgedChunks.has(i)) {
+          allAcknowledged = false;
+          break;
+        }
+      }
+      
+      if (!allAcknowledged) {
+        // Not all chunks acknowledged yet, wait before checking again
+        const pendingChunks = [];
+        for (let i = 0; i < this.chunks.length; i++) {
+          if (!this.acknowledgedChunks.has(i)) {
+            pendingChunks.push(i);
+          }
+        }
+        console.log(`[FileTransferSender] Waiting for acknowledgments. Pending chunks (${pendingChunks.length}): [${pendingChunks.slice(0, 10).join(', ')}${pendingChunks.length > 10 ? '...' : ''}]`);
+        
+        // Wait and check again
+        await new Promise(resolve => setTimeout(resolve, 500));
+        this.sendNextChunk();
+        return;
+      }
+      
+      // All chunks acknowledged, safe to complete
       if (typeof this.onFileComplete === 'function') {
         this.onFileComplete(this._fileIndex);
       }
+      this.acknowledgedChunks.clear();
       this.sendMessage({ type: 'complete' });
       this._fileIndex++;
       await this.startNextFile();
@@ -617,6 +690,24 @@ export class FileTransferReceiver {
   private receivedChunks = new Map<number, ArrayBuffer>();
   private startTime = 0;
   private bytesReceived = 0;
+  private onSendControlMessage?: (msg: ChunkMessage) => void; // ✅ Callback to send control messages
+  
+  /**
+   * Set callback to send control messages (acks, etc.)
+   */
+  public setSendControlMessage(callback: (msg: ChunkMessage) => void) {
+    this.onSendControlMessage = callback;
+  }
+  
+  /**
+   * Send ack-all message to notify sender that all chunks received
+   */
+  private sendAckAll() {
+    if (this.onSendControlMessage) {
+      console.log('[FileTransferReceiver] Sending ack-all message to sender');
+      this.onSendControlMessage({ type: 'ack-all' });
+    }
+  }
 
   public onMetadata?: (metadata: FileMetadata) => void;
   public onProgress?: (progress: TransferProgress) => void;
@@ -749,6 +840,11 @@ export class FileTransferReceiver {
     this.receivedChunkBitmap[index] = true;
     this.bytesReceived += chunkData.byteLength;
     
+    // ✅ NEW: Send acknowledgment to sender
+    if (this.onSendControlMessage) {
+      this.onSendControlMessage({ type: 'chunk-ack', chunkIndex: index });
+    }
+    
     // ✅ IMPROVED: Log with clearer formatting for large files
     const receivedCount = this.receivedChunkBitmap.filter(b => b).length;
     const percentage = (receivedCount / this.metadata.chunks * 100).toFixed(2);
@@ -869,6 +965,10 @@ export class FileTransferReceiver {
       sha256: hashB64,
       first16: reassembledHex
     });
+    
+    // ✅ Send ack-all message to sender before completing
+    this.sendAckAll();
+    
     if (typeof this.onComplete === 'function') {
       console.log(`[FileTransferReceiver] Calling onComplete for fileIndex=${this.currentFileIndex}, blob.size=${blob.size}`);
       this.onComplete(blob, this.currentFileIndex);
