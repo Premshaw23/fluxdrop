@@ -917,6 +917,13 @@ export class FileTransferReceiver {
       console.log(`[FileTransferReceiver] Progress: ${receivedIndices.length} chunks stored, bitmap: ${receivedCount}/${this.metadata.chunks}, total size: ${this.bytesReceived} bytes`);
     }
     
+    // ✅ NEW: If we already received 'complete' and now have all chunks, complete immediately
+    if (this.completeMessageReceived && receivedCount === this.metadata.chunks) {
+      console.log('[FileTransferReceiver] All chunks finally received after waiting. Completing now.');
+      this.handleComplete();
+      return;
+    }
+    
     this.updateProgress();
   }
 
@@ -1022,6 +1029,10 @@ export class FileTransferReceiver {
       this.onError?.(new Error(errorMsg));
       return;
     }
+    
+    // ✅ CRITICAL: Reset wait state to prevent stuck waiting loops
+    this.completeMessageReceived = false;
+    this.completeWaitStartTime = 0;
     
     // Calculate SHA-256 hash of the reconstructed file
     const arrayBuffer = await blob.arrayBuffer();
