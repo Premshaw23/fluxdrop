@@ -749,23 +749,52 @@ export class FileTransferReceiver {
   private receivedChunks = new Map<number, ArrayBuffer>();
   private startTime = 0;
   private bytesReceived = 0;
-  private onSendControlMessage?: (msg: ChunkMessage) => void; // ✅ Callback to send control messages
+  private sendDataCallback?: (data: ArrayBuffer | Uint8Array) => boolean; // ✅ Callback to send binary data
   
   /**
-   * Set callback to send control messages (acks, etc.)
+   * Set callback to send binary data (for control messages and acks)
    */
-  public setSendControlMessage(callback: (msg: ChunkMessage) => void) {
-    this.onSendControlMessage = callback;
+  public setSendData(callback: (data: ArrayBuffer | Uint8Array) => boolean) {
+    this.sendDataCallback = callback;
+  }
+  
+  /**
+   * Send encoded control message (ack or ack-all)
+   */
+  private sendControlMessage(message: ChunkMessage) {
+    if (!this.sendDataCallback) {
+      console.warn('[FileTransferReceiver] sendDataCallback not set, cannot send control message');
+      return;
+    }
+    
+    const encoder = new TextEncoder();
+    const headerObj: any = {
+      type: message.type,
+      chunkIndex: message.chunkIndex
+    };
+    
+    const json = JSON.stringify(headerObj);
+    const header = encoder.encode(json);
+    
+    // Use DataView for proper endianness (little-endian)
+    const headerLengthBuffer = new ArrayBuffer(4);
+    const headerLengthView = new DataView(headerLengthBuffer);
+    headerLengthView.setUint32(0, header.length, true); // true = little-endian
+    
+    const combined = new Uint8Array(4 + header.length);
+    combined.set(new Uint8Array(headerLengthBuffer), 0);
+    combined.set(header, 4);
+    
+    const result = this.sendDataCallback(combined);
+    console.log(`[FileTransferReceiver] Sent control message type=${message.type}, chunkIndex=${message.chunkIndex}, bytes=${combined.byteLength}, sendData returned:`, result);
   }
   
   /**
    * Send ack-all message to notify sender that all chunks received
    */
   private sendAckAll() {
-    if (this.onSendControlMessage) {
-      console.log('[FileTransferReceiver] Sending ack-all message to sender');
-      this.onSendControlMessage({ type: 'ack-all' });
-    }
+    console.log('[FileTransferReceiver] Sending ack-all message to sender');
+    this.sendControlMessage({ type: 'ack-all' });
   }
 
   public onMetadata?: (metadata: FileMetadata) => void;
@@ -902,8 +931,8 @@ export class FileTransferReceiver {
     this.bytesReceived += chunkData.byteLength;
     
     // ✅ NEW: Send acknowledgment to sender
-    if (this.onSendControlMessage) {
-      this.onSendControlMessage({ type: 'chunk-ack', chunkIndex: index });
+    if (this.sendDataCallback) {
+      this.sendControlMessage({ type: 'chunk-ack', chunkIndex: index });
     }
     
     // ✅ IMPROVED: Log with clearer formatting for large files
