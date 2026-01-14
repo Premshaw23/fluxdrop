@@ -524,10 +524,11 @@ export class FileTransferSender {
       return;
     }
 
-    // ✅ Backpressure: pause if too many unacknowledged chunks
-    const unackedCount = this.countUnacknowledgedChunks();
-    if (unackedCount > this.unackedCountThreshold) {
-      console.log(`[FileTransferSender] Backpressure: ${unackedCount} chunks unacked. Pausing...`);
+    // ✅ Backpressure: pause if too many sent chunks are unacknowledged
+    // Count only chunks we've SENT that haven't been acked
+    const sentButUnackedCount = this.currentChunk - this.acknowledgedChunks.size;
+    if (sentButUnackedCount > this.unackedCountThreshold) {
+      console.log(`[FileTransferSender] Backpressure: ${sentButUnackedCount} sent chunks unacked. Pausing...`);
       setTimeout(() => this.sendNextChunk(), 200);
       return;
     }
