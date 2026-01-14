@@ -332,6 +332,10 @@ export class FileTransferSender {
       this.handleChunkAck(header.chunkIndex);
     } else if (header.type === 'ack-all') {
       this.handleAckAll();
+    } else if (header.type === 'resume-request') {
+      // ✅ NEW: Receiver asking for missing chunks
+      console.log(`[FileTransferSender] Received resume-request for chunks:`, header.missingChunks);
+      this.handleResumeRequest(header.missingChunks || []);
     }
   }
   
@@ -458,56 +462,31 @@ export class FileTransferSender {
     }
 
     if (this.currentChunk >= this.chunks.length) {
-      // ✅ FIX: Wait for all chunks to be acknowledged with proper timeout
+      // ✅ FIX: All chunks sent, immediately send complete message
+      // Let receiver request missing chunks via resume-request
       if (!this.chunks) {
         this.onError?.(new Error('No chunks available'));
         return;
       }
       
-      const unackedChunks = this.getUnacknowledgedChunks();
-      
-      if (unackedChunks.length > 0) {
-        // Initialize wait timer on first call
-        if (this.ackWaitStartTime === 0) {
-          this.ackWaitStartTime = Date.now();
-          this.ackWaitRetryCount = 0;
-          console.log(`[FileTransferSender] Started waiting for acknowledgments. Pending: ${unackedChunks.length}/${this.chunks.length}`);
-        }
-        
-        const elapsed = Date.now() - this.ackWaitStartTime;
-        
-        // Check timeout
-        if (elapsed > this.ACK_TIMEOUT_MS) {
-          const errorMsg = `Acknowledgment timeout after ${this.ACK_TIMEOUT_MS}ms. Missing chunks: [${unackedChunks.slice(0, 10).join(', ')}${unackedChunks.length > 10 ? '...' : ''}]`;
-          console.error(`[FileTransferSender] ${errorMsg}`);
-          this.logError(errorMsg);
-          this.onError?.(new Error(errorMsg));
-          this.isCancelled = true;
-          return;
-        }
-        
-        // Exponential backoff
-        const backoffIndex = Math.min(this.ackWaitRetryCount, this.ACK_BACKOFF_MS.length - 1);
-        const waitTime = this.ACK_BACKOFF_MS[backoffIndex];
-        this.ackWaitRetryCount++;
-        
-        console.log(`[FileTransferSender] Waiting for acks (${elapsed}ms/${this.ACK_TIMEOUT_MS}ms). Pending: ${unackedChunks.length}. Waiting ${waitTime}ms...`);
-        
-        // Recursively check again after waiting
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        this.sendNextChunk();
-        return;
-      }
-      
-      // All chunks acknowledged, safe to complete
-      console.log(`[FileTransferSender] All chunks acknowledged. Completing transfer.`);
+      console.log(`[FileTransferSender] All chunks sent (${this.chunks.length}). Sending complete message to trigger receiver resend...`);
       if (typeof this.onFileComplete === 'function') {
         this.onFileComplete(this._fileIndex);
       }
-      this.ackWaitStartTime = 0; // Reset for next file
+      
+      // ✅ IMPROVED: Send complete message multiple times with longer delays (for network reliability)
+      for (let i = 0; i < 5; i++) {
+        setTimeout(() => {
+          console.log(`[FileTransferSender] Sending complete message (attempt ${i + 1}/5)`);
+          this.sendMessage({ type: 'complete' });
+        }, i * 1000); // 1 second between attempts
+      }
+      
+      // Reset for next file
+      this.ackWaitStartTime = 0;
       this.ackWaitRetryCount = 0;
       this.acknowledgedChunks.clear();
-      this.sendMessage({ type: 'complete' });
+      
       this._fileIndex++;
       await this.startNextFile();
       return;
@@ -1009,13 +988,35 @@ export class FileTransferReceiver {
       }
     }
     
-    // ✅ IMPROVED: Handle missing chunks gracefully - WAIT instead of failing immediately
+    // ✅ IMPROVED: Handle missing chunks gracefully - WAIT and REQUEST RESEND
     if (missingChunks.length > 0) {
       // First time receiving 'complete' with missing chunks
       if (this.completeWaitStartTime === 0) {
         this.completeWaitStartTime = Date.now();
         this.completeMessageReceived = true;
-        console.log(`[FileTransferReceiver] Received 'complete' but missing ${missingChunks.length} chunks. Waiting for them...`);
+        console.log(`[FileTransferReceiver] Received 'complete' but missing ${missingChunks.length} chunks. Requesting resend...`);
+        
+        // ✅ NEW: Actively request missing chunks from sender
+        if (this.sendDataCallback) {
+          const encoder = new TextEncoder();
+          const headerObj = {
+            type: 'resume-request',
+            missingChunks: missingChunks
+          };
+          const json = JSON.stringify(headerObj);
+          const header = encoder.encode(json);
+          
+          const headerLengthBuffer = new ArrayBuffer(4);
+          const headerLengthView = new DataView(headerLengthBuffer);
+          headerLengthView.setUint32(0, header.length, true);
+          
+          const combined = new Uint8Array(4 + header.length);
+          combined.set(new Uint8Array(headerLengthBuffer), 0);
+          combined.set(header, 4);
+          
+          this.sendDataCallback(combined);
+          console.log(`[FileTransferReceiver] Sent resume-request for ${missingChunks.length} chunks`);
+        }
       }
       
       const elapsed = Date.now() - this.completeWaitStartTime;
@@ -1032,8 +1033,29 @@ export class FileTransferReceiver {
         return;
       }
       
-      // Still waiting for chunks
-      console.log(`[FileTransferReceiver] Still waiting (${elapsed}ms/${this.RECEIVER_WAIT_TIMEOUT_MS}ms). Missing chunks: ${missingChunks.length}/${this.metadata.chunks}. Checking again in 500ms...`);
+      // Still waiting for chunks - request again periodically
+      if (elapsed % 2000 === 0) {
+        console.log(`[FileTransferReceiver] Still waiting (${elapsed}ms/${this.RECEIVER_WAIT_TIMEOUT_MS}ms). Missing chunks: ${missingChunks.length}/${this.metadata.chunks}. Requesting again...`);
+        if (this.sendDataCallback) {
+          const encoder = new TextEncoder();
+          const headerObj = {
+            type: 'resume-request',
+            missingChunks: missingChunks
+          };
+          const json = JSON.stringify(headerObj);
+          const header = encoder.encode(json);
+          
+          const headerLengthBuffer = new ArrayBuffer(4);
+          const headerLengthView = new DataView(headerLengthBuffer);
+          headerLengthView.setUint32(0, header.length, true);
+          
+          const combined = new Uint8Array(4 + header.length);
+          combined.set(new Uint8Array(headerLengthBuffer), 0);
+          combined.set(header, 4);
+          
+          this.sendDataCallback(combined);
+        }
+      }
       
       // Check again after 500ms
       await new Promise(resolve => setTimeout(resolve, 500));
