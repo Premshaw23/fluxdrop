@@ -98,6 +98,11 @@ export class FileTransferSender {
             private maxBufferedChunks: number = 10; // Only buffer 10 chunks at a time
             private acknowledgedChunks: Set<number> = new Set(); // Track acknowledged chunks
             private ackWaitTimeout: NodeJS.Timeout | null = null; // Timeout for waiting for acks
+            private readonly ACK_TIMEOUT_MS = 30000; // ✅ 30 second timeout for all acks
+            private readonly ACK_BACKOFF_MS = [100, 200, 500, 1000, 2000]; // ✅ Exponential backoff
+            private ackWaitStartTime: number = 0; // ✅ When we started waiting
+            private ackWaitRetryCount: number = 0; // ✅ How many times we've waited
+            private unackedCountThreshold: number = 50; // ✅ Pause if > N chunks unacked
           /**
            * Set chunk size for optimization (in bytes)
            */
@@ -219,6 +224,8 @@ export class FileTransferSender {
       this.startTime = Date.now();
       this.sentChunkBitmap = new Array(this.chunks.length).fill(false);
       this.acknowledgedChunks.clear(); // ✅ Reset acknowledged chunks for new file
+      this.ackWaitStartTime = 0; // ✅ Reset ack wait timer
+      this.ackWaitRetryCount = 0; // ✅ Reset retry count
       // Preload chunk buffers for current file
       this.chunkBuffer = new Array(this.chunks.length).fill(null);
       // Preload only the first N chunks
@@ -264,6 +271,34 @@ export class FileTransferSender {
     return [...this.errorLog];
   }
   
+  /**
+   * Count how many chunks are unacknowledged
+   */
+  private countUnacknowledgedChunks(): number {
+    if (!this.chunks) return 0;
+    let count = 0;
+    for (let i = 0; i < this.chunks.length; i++) {
+      if (!this.acknowledgedChunks.has(i)) {
+        count++;
+      }
+    }
+    return count;
+  }
+  
+  /**
+   * Get list of unacknowledged chunk indices
+   */
+  private getUnacknowledgedChunks(): number[] {
+    if (!this.chunks) return [];
+    const unacked: number[] = [];
+    for (let i = 0; i < this.chunks.length; i++) {
+      if (!this.acknowledgedChunks.has(i)) {
+        unacked.push(i);
+      }
+    }
+    return unacked;
+  }
+
   /**
    * Handle chunk acknowledgment from receiver
    */
@@ -423,41 +458,54 @@ export class FileTransferSender {
     }
 
     if (this.currentChunk >= this.chunks.length) {
-      // ✅ FIX: Wait for all chunks to be acknowledged before sending complete
+      // ✅ FIX: Wait for all chunks to be acknowledged with proper timeout
       if (!this.chunks) {
         this.onError?.(new Error('No chunks available'));
         return;
       }
       
-      // Check if all chunks have been acknowledged
-      let allAcknowledged = true;
-      for (let i = 0; i < this.chunks.length; i++) {
-        if (!this.acknowledgedChunks.has(i)) {
-          allAcknowledged = false;
-          break;
-        }
-      }
+      const unackedChunks = this.getUnacknowledgedChunks();
       
-      if (!allAcknowledged) {
-        // Not all chunks acknowledged yet, wait before checking again
-        const pendingChunks = [];
-        for (let i = 0; i < this.chunks.length; i++) {
-          if (!this.acknowledgedChunks.has(i)) {
-            pendingChunks.push(i);
-          }
+      if (unackedChunks.length > 0) {
+        // Initialize wait timer on first call
+        if (this.ackWaitStartTime === 0) {
+          this.ackWaitStartTime = Date.now();
+          this.ackWaitRetryCount = 0;
+          console.log(`[FileTransferSender] Started waiting for acknowledgments. Pending: ${unackedChunks.length}/${this.chunks.length}`);
         }
-        console.log(`[FileTransferSender] Waiting for acknowledgments. Pending chunks (${pendingChunks.length}): [${pendingChunks.slice(0, 10).join(', ')}${pendingChunks.length > 10 ? '...' : ''}]`);
         
-        // Wait and check again
-        await new Promise(resolve => setTimeout(resolve, 500));
+        const elapsed = Date.now() - this.ackWaitStartTime;
+        
+        // Check timeout
+        if (elapsed > this.ACK_TIMEOUT_MS) {
+          const errorMsg = `Acknowledgment timeout after ${this.ACK_TIMEOUT_MS}ms. Missing chunks: [${unackedChunks.slice(0, 10).join(', ')}${unackedChunks.length > 10 ? '...' : ''}]`;
+          console.error(`[FileTransferSender] ${errorMsg}`);
+          this.logError(errorMsg);
+          this.onError?.(new Error(errorMsg));
+          this.isCancelled = true;
+          return;
+        }
+        
+        // Exponential backoff
+        const backoffIndex = Math.min(this.ackWaitRetryCount, this.ACK_BACKOFF_MS.length - 1);
+        const waitTime = this.ACK_BACKOFF_MS[backoffIndex];
+        this.ackWaitRetryCount++;
+        
+        console.log(`[FileTransferSender] Waiting for acks (${elapsed}ms/${this.ACK_TIMEOUT_MS}ms). Pending: ${unackedChunks.length}. Waiting ${waitTime}ms...`);
+        
+        // Recursively check again after waiting
+        await new Promise(resolve => setTimeout(resolve, waitTime));
         this.sendNextChunk();
         return;
       }
       
       // All chunks acknowledged, safe to complete
+      console.log(`[FileTransferSender] All chunks acknowledged. Completing transfer.`);
       if (typeof this.onFileComplete === 'function') {
         this.onFileComplete(this._fileIndex);
       }
+      this.ackWaitStartTime = 0; // Reset for next file
+      this.ackWaitRetryCount = 0;
       this.acknowledgedChunks.clear();
       this.sendMessage({ type: 'complete' });
       this._fileIndex++;
@@ -473,6 +521,14 @@ export class FileTransferSender {
       this.logError(`Max retries reached for chunk ${this.currentChunk}. Aborting transfer.`);
       this.onError?.(new Error(`Max retries reached for chunk ${this.currentChunk}`));
       this.isCancelled = true;
+      return;
+    }
+
+    // ✅ Backpressure: pause if too many unacknowledged chunks
+    const unackedCount = this.countUnacknowledgedChunks();
+    if (unackedCount > this.unackedCountThreshold) {
+      console.log(`[FileTransferSender] Backpressure: ${unackedCount} chunks unacked. Pausing...`);
+      setTimeout(() => this.sendNextChunk(), 200);
       return;
     }
 
@@ -679,6 +735,9 @@ export class FileTransferReceiver {
     }
   private decryptionKey: CryptoKey | null = null;
   private receivedChunkBitmap: boolean[] = [];
+  private completeMessageReceived: boolean = false; // ✅ Track if 'complete' was received
+  private readonly RECEIVER_WAIT_TIMEOUT_MS = 15000; // ✅ 15 seconds to wait for missing chunks
+  private completeWaitStartTime: number = 0; // ✅ When we received 'complete' message
 
   /**
    * Optionally set an AES-GCM key for decrypting chunks
@@ -767,7 +826,9 @@ export class FileTransferReceiver {
     this.receivedChunks.clear();
     this.bytesReceived = 0;
     this.startTime = Date.now();
-      this.receivedChunkBitmap = new Array(metadata.chunks).fill(false);
+    this.completeMessageReceived = false; // ✅ Reset for new file
+    this.completeWaitStartTime = 0; // ✅ Reset wait timer
+    this.receivedChunkBitmap = new Array(metadata.chunks).fill(false);
 
     console.log(`📥 Receiving: ${metadata.name} (${metadata.size} bytes, ${metadata.chunks} chunks)`);
     this.onMetadata?.(metadata);
@@ -911,24 +972,35 @@ export class FileTransferReceiver {
       }
     }
     
-    // ✅ IMPROVED: Handle missing chunks gracefully - request resend instead of failing immediately
+    // ✅ IMPROVED: Handle missing chunks gracefully - WAIT instead of failing immediately
     if (missingChunks.length > 0) {
-      const missingPercentage = ((missingChunks.length / this.metadata.chunks) * 100).toFixed(2);
-      const errorMsg = missingChunks.length === 1
-        ? `Missing chunk ${missingChunks[0]} of ${this.metadata.chunks} (${missingPercentage}%)`
-        : `Missing ${missingChunks.length} chunks of ${this.metadata.chunks} (${missingPercentage}%): [${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}]`;
+      // First time receiving 'complete' with missing chunks
+      if (this.completeWaitStartTime === 0) {
+        this.completeWaitStartTime = Date.now();
+        this.completeMessageReceived = true;
+        console.log(`[FileTransferReceiver] Received 'complete' but missing ${missingChunks.length} chunks. Waiting for them...`);
+      }
       
-      console.error(`[FileTransferReceiver] ${errorMsg}`);
-      console.log(`[FileTransferReceiver] Missing chunk debug:`, {
-        receivedIndices: Array.from(this.receivedChunks.keys()).sort((a, b) => a - b),
-        bitmapTrueCount: this.receivedChunkBitmap.filter(b => b).length,
-        bitmapLength: this.receivedChunkBitmap.length,
-        missingChunks,
-        expectedChunks: this.metadata.chunks,
-        expectedSize: this.metadata.size,
-        actualSize: totalSize
-      });
-      this.onError?.(new Error(errorMsg));
+      const elapsed = Date.now() - this.completeWaitStartTime;
+      
+      // Check timeout
+      if (elapsed > this.RECEIVER_WAIT_TIMEOUT_MS) {
+        const missingPercentage = ((missingChunks.length / this.metadata.chunks) * 100).toFixed(2);
+        const errorMsg = missingChunks.length === 1
+          ? `Missing chunk ${missingChunks[0]} of ${this.metadata.chunks} (${missingPercentage}%)`
+          : `Missing ${missingChunks.length} chunks of ${this.metadata.chunks} (${missingPercentage}%): [${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}]`;
+        
+        console.error(`[FileTransferReceiver] Timeout waiting for missing chunks: ${errorMsg}`);
+        this.onError?.(new Error(errorMsg));
+        return;
+      }
+      
+      // Still waiting for chunks
+      console.log(`[FileTransferReceiver] Still waiting (${elapsed}ms/${this.RECEIVER_WAIT_TIMEOUT_MS}ms). Missing chunks: ${missingChunks.length}/${this.metadata.chunks}. Checking again in 500ms...`);
+      
+      // Check again after 500ms
+      await new Promise(resolve => setTimeout(resolve, 500));
+      this.handleComplete();
       return;
     }
     
@@ -983,6 +1055,8 @@ export class FileTransferReceiver {
     this.metadata = null;
     this.receivedChunks.clear();
     this.bytesReceived = 0;
+    this.completeMessageReceived = false; // ✅ Reset
+    this.completeWaitStartTime = 0; // ✅ Reset
   }
 }
 
