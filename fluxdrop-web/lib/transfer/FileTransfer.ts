@@ -145,6 +145,9 @@ export class FileTransferSender {
      */
     public async handleResumeRequest(missingChunks: number[]) {
       if (!this.chunks || !this.file) return;
+      
+      console.log(`[FileTransferSender] Handling resume-request for ${missingChunks.length} chunks: [${missingChunks.slice(0, 20).join(', ')}${missingChunks.length > 20 ? '...' : ''}]`);
+      
       for (const idx of missingChunks) {
         if (idx >= 0 && idx < this.chunks.length && !this.sentChunkBitmap[idx]) {
           const chunk = this.chunks[idx];
@@ -165,6 +168,9 @@ export class FileTransferSender {
             hash: hashB64
           });
           this.sentChunkBitmap[idx] = true;
+          console.log(`[FileTransferSender] Resent chunk ${idx}`);
+        } else if (idx >= 0 && idx < this.chunks.length && this.sentChunkBitmap[idx]) {
+          console.log(`[FileTransferSender] Chunk ${idx} already sent, not resending`);
         }
       }
     }
@@ -716,7 +722,7 @@ export class FileTransferReceiver {
   private decryptionKey: CryptoKey | null = null;
   private receivedChunkBitmap: boolean[] = [];
   private completeMessageReceived: boolean = false; // ✅ Track if 'complete' was received
-  private readonly RECEIVER_WAIT_TIMEOUT_MS = 15000; // ✅ 15 seconds to wait for missing chunks
+  private readonly RECEIVER_WAIT_TIMEOUT_MS = 60000; // ✅ 60 seconds to wait for missing chunks in production
   private completeWaitStartTime: number = 0; // ✅ When we received 'complete' message
 
   /**
@@ -739,7 +745,7 @@ export class FileTransferReceiver {
   }
   
   /**
-   * Send encoded control message (ack or ack-all)
+   * Send encoded control message (ack, ack-all, resume-request)
    */
   private sendControlMessage(message: ChunkMessage) {
     if (!this.sendDataCallback) {
@@ -749,9 +755,14 @@ export class FileTransferReceiver {
     
     const encoder = new TextEncoder();
     const headerObj: any = {
-      type: message.type,
-      chunkIndex: message.chunkIndex
+      type: message.type
     };
+    
+    // Include chunkIndex if present
+    if (message.chunkIndex !== undefined) headerObj.chunkIndex = message.chunkIndex;
+    
+    // ✅ CRITICAL FIX: Include missingChunks for resume-request
+    if (message.missingChunks) headerObj.missingChunks = message.missingChunks;
     
     const json = JSON.stringify(headerObj);
     const header = encoder.encode(json);
@@ -766,7 +777,7 @@ export class FileTransferReceiver {
     combined.set(header, 4);
     
     const result = this.sendDataCallback(combined);
-    console.log(`[FileTransferReceiver] Sent control message type=${message.type}, chunkIndex=${message.chunkIndex}, bytes=${combined.byteLength}, sendData returned:`, result);
+    console.log(`[FileTransferReceiver] Sent control message type=${message.type}, missingChunks=${message.missingChunks?.length || 0}, bytes=${combined.byteLength}, sendData returned:`, result);
   }
   
   /**
@@ -996,27 +1007,8 @@ export class FileTransferReceiver {
         this.completeMessageReceived = true;
         console.log(`[FileTransferReceiver] Received 'complete' but missing ${missingChunks.length} chunks. Requesting resend...`);
         
-        // ✅ NEW: Actively request missing chunks from sender
-        if (this.sendDataCallback) {
-          const encoder = new TextEncoder();
-          const headerObj = {
-            type: 'resume-request',
-            missingChunks: missingChunks
-          };
-          const json = JSON.stringify(headerObj);
-          const header = encoder.encode(json);
-          
-          const headerLengthBuffer = new ArrayBuffer(4);
-          const headerLengthView = new DataView(headerLengthBuffer);
-          headerLengthView.setUint32(0, header.length, true);
-          
-          const combined = new Uint8Array(4 + header.length);
-          combined.set(new Uint8Array(headerLengthBuffer), 0);
-          combined.set(header, 4);
-          
-          this.sendDataCallback(combined);
-          console.log(`[FileTransferReceiver] Sent resume-request for ${missingChunks.length} chunks`);
-        }
+        // ✅ NEW: Actively request missing chunks from sender using sendControlMessage
+        this.sendControlMessage({ type: 'resume-request', missingChunks });
       }
       
       const elapsed = Date.now() - this.completeWaitStartTime;
@@ -1034,27 +1026,9 @@ export class FileTransferReceiver {
       }
       
       // Still waiting for chunks - request again periodically
-      if (elapsed % 2000 === 0) {
-        console.log(`[FileTransferReceiver] Still waiting (${elapsed}ms/${this.RECEIVER_WAIT_TIMEOUT_MS}ms). Missing chunks: ${missingChunks.length}/${this.metadata.chunks}. Requesting again...`);
-        if (this.sendDataCallback) {
-          const encoder = new TextEncoder();
-          const headerObj = {
-            type: 'resume-request',
-            missingChunks: missingChunks
-          };
-          const json = JSON.stringify(headerObj);
-          const header = encoder.encode(json);
-          
-          const headerLengthBuffer = new ArrayBuffer(4);
-          const headerLengthView = new DataView(headerLengthBuffer);
-          headerLengthView.setUint32(0, header.length, true);
-          
-          const combined = new Uint8Array(4 + header.length);
-          combined.set(new Uint8Array(headerLengthBuffer), 0);
-          combined.set(header, 4);
-          
-          this.sendDataCallback(combined);
-        }
+      if (elapsed % 500 === 0) {
+        console.log(`[FileTransferReceiver] Still waiting (${elapsed}ms/${this.RECEIVER_WAIT_TIMEOUT_MS}ms). Missing chunks: ${missingChunks.length}/${this.metadata.chunks}: [${missingChunks.slice(0, 20).join(', ')}${missingChunks.length > 20 ? '...' : ''}]. Requesting again...`);
+        this.sendControlMessage({ type: 'resume-request', missingChunks });
       }
       
       // Check again after 500ms
