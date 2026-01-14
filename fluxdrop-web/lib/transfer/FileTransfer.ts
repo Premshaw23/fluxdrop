@@ -149,7 +149,8 @@ export class FileTransferSender {
       console.log(`[FileTransferSender] Handling resume-request for ${missingChunks.length} chunks: [${missingChunks.slice(0, 20).join(', ')}${missingChunks.length > 20 ? '...' : ''}]`);
       
       for (const idx of missingChunks) {
-        if (idx >= 0 && idx < this.chunks.length && !this.sentChunkBitmap[idx]) {
+        // ✅ FIX: Resend ALL requested chunks, regardless of bitmap (network may have lost them)
+        if (idx >= 0 && idx < this.chunks.length) {
           const chunk = this.chunks[idx];
           let arrayBuffer = await chunk.arrayBuffer();
           let iv: Uint8Array | undefined = undefined;
@@ -167,10 +168,7 @@ export class FileTransferSender {
             ...(iv ? { iv: Array.from(iv) } : {}),
             hash: hashB64
           });
-          this.sentChunkBitmap[idx] = true;
           console.log(`[FileTransferSender] Resent chunk ${idx}`);
-        } else if (idx >= 0 && idx < this.chunks.length && this.sentChunkBitmap[idx]) {
-          console.log(`[FileTransferSender] Chunk ${idx} already sent, not resending`);
         }
       }
     }
