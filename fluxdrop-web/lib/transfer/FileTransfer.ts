@@ -770,22 +770,45 @@ export class FileTransferReceiver {
 
     // Combine all chunks in order
     const chunks: ArrayBuffer[] = [];
+    const missingChunks: number[] = [];
+    let totalSize = 0;
+    
     for (let i = 0; i < this.metadata.chunks; i++) {
       const chunk = this.receivedChunks.get(i);
       if (!chunk) {
-        console.error(`[FileTransferReceiver] Missing chunk ${i} of ${this.metadata.chunks}`);
-        if (this.onError) this.onError(new Error(`Missing chunk ${i}`));
-        // Verbose: print all received indices and bitmap
-        console.log(`[FileTransferReceiver] Missing chunk debug:`, {
-          receivedIndices: Array.from(this.receivedChunks.keys()),
-          bitmap: this.receivedChunkBitmap
-        });
-        return;
+        missingChunks.push(i);
+      } else {
+        totalSize += chunk.byteLength;
+        chunks.push(chunk);
       }
-      chunks.push(chunk);
+    }
+    
+    // ✅ NEW: Report all missing chunks at once (not just first)
+    if (missingChunks.length > 0) {
+      const errorMsg = missingChunks.length === 1
+        ? `Missing chunk ${missingChunks[0]} of ${this.metadata.chunks}`
+        : `Missing ${missingChunks.length} chunks of ${this.metadata.chunks}: [${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}]`;
+      
+      console.error(`[FileTransferReceiver] ${errorMsg}`);
+      console.log(`[FileTransferReceiver] Missing chunk debug:`, {
+        receivedIndices: Array.from(this.receivedChunks.keys()),
+        bitmap: this.receivedChunkBitmap,
+        missingChunks
+      });
+      this.onError?.(new Error(errorMsg));
+      return;
     }
 
     const blob = new Blob(chunks, { type: this.metadata.type });
+    
+    // ✅ NEW: Validate final file size matches expected size
+    if (blob.size !== this.metadata.size) {
+      const errorMsg = `File size mismatch: received ${blob.size} bytes, expected ${this.metadata.size} bytes`;
+      console.error(`[FileTransferReceiver] ${errorMsg}`);
+      this.onError?.(new Error(errorMsg));
+      return;
+    }
+    
     // Calculate SHA-256 hash of the reconstructed file
     const arrayBuffer = await blob.arrayBuffer();
     // Log first 16 bytes of reconstructed file

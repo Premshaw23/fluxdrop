@@ -26,6 +26,13 @@ export class SessionManager {
     this.redis.on('error', (err) => {
       console.error('Redis connection error:', err);
     });
+    
+    // ✅ NEW: Periodic cleanup of expired sessions every 30 seconds
+    setInterval(() => {
+      this.cleanupExpired().catch((err) => {
+        console.error('Error during periodic session cleanup:', err);
+      });
+    }, 30 * 1000);
   }
 
   async generateCode(): Promise<string> {
