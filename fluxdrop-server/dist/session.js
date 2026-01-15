@@ -42,12 +42,13 @@ export class SessionManager {
         }
         throw new Error('Unable to generate unique session code');
     }
-    async createSession(code, sender) {
+    async createSession(code, sender, senderName) {
         const now = Date.now();
         const ttl = Math.floor(this.SESSION_TIMEOUT / 1000);
         const session = {
             code,
             sender,
+            ...(senderName ? { senderName } : {}),
             createdAt: now,
             expiresAt: now + this.SESSION_TIMEOUT
         };

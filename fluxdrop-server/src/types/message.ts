@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 // Message schemas
 const CreateSessionSchema = z.object({
-  type: z.literal('create-session')
+  type: z.literal('create-session'),
+  senderName: z.string().optional()
 });
 
 const JoinSessionSchema = z.object({
@@ -58,6 +59,10 @@ const DiscoveryInviteSchema = z.object({
   senderName: z.string().optional(),
 });
 
+const SessionCancelSchema = z.object({
+  type: z.literal("session-cancel"),
+});
+
 export const SignalingMessageSchema = z.discriminatedUnion("type", [
   CreateSessionSchema,
   JoinSessionSchema,
@@ -68,6 +73,7 @@ export const SignalingMessageSchema = z.discriminatedUnion("type", [
   DiscoveryAnnounceSchema,
   DiscoveryListSchema,
   DiscoveryInviteSchema,
+  SessionCancelSchema,
 ]);
 
 export type SignalingMessage = z.infer<typeof SignalingMessageSchema>;
@@ -79,7 +85,7 @@ export function validateMessage(message: unknown) {
 // Server response types
 export type ServerMessage = 
   | { type: 'session-created'; code: string; expiresIn: number }
-  | { type: 'session-joined'; code: string }
+  | { type: 'session-joined'; code: string; senderName?: string }
   | { type: 'peer-joined' }
   | { type: 'peer-disconnected' }
   | { type: 'offer'; sdp: string }

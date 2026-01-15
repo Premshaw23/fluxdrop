@@ -213,6 +213,10 @@ async function handleMessage(ws: WebSocket, message: SignalingMessage) {
       await handleSignaling(ws, client, message);
       break;
     
+    case 'session-cancel':
+      await handleSessionCancel(ws, client);
+      break;
+    
     default:
       sendError(ws, 'Unknown message type');
   }
@@ -252,6 +256,26 @@ async function handleJoinSession(ws: WebSocket, client: ClientConnection, code: 
   send(ws, { type: 'session-joined', code });
   send(session.sender, { type: 'peer-joined' });
   console.log(`🤝 Receiver joined session: ${code}`);
+}
+
+async function handleSessionCancel(ws: WebSocket, client: ClientConnection) {
+  if (!client.sessionCode || !client.role) return;
+
+  const session = sessionManager.getSession(client.sessionCode);
+  if (!session) return;
+
+  console.log(`❌ Session cancelled by ${client.role}: ${client.sessionCode}`);
+  
+  // Notify other peer
+  const otherRole = client.role === 'sender' ? 'receiver' : 'sender';
+  const otherClient = session[otherRole];
+  
+  if (otherClient && otherClient.readyState === WebSocket.OPEN) {
+    send(otherClient, { type: 'peer-disconnected' });
+  }
+
+  // Remove the session
+  await sessionManager.removeClient(client.sessionCode, client.role);
 }
 
 async function handleSignaling(ws: WebSocket, client: ClientConnection, message: SignalingMessage) {

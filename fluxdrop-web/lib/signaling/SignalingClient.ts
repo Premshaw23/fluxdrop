@@ -104,8 +104,8 @@ export class SignalingClient {
     }
   }
 
-  createSession() {
-    this.send({ type: 'create-session' });
+  createSession(senderName?: string) {
+    this.send({ type: 'create-session', senderName });
   }
 
   joinSession(code: string) {
@@ -163,7 +163,15 @@ export class SignalingClient {
 
   disconnect() {
     if (this.ws) {
-      this.ws.close();
+      // Clear handlers to prevent reconnect/logging
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
+      this.ws.onopen = null;
+
+      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+        this.ws.close();
+      }
       this.ws = null;
     }
     this.messageHandlers.clear();

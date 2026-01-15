@@ -1,10 +1,13 @@
 import { z } from 'zod';
 export declare const SignalingMessageSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
     type: z.ZodLiteral<"create-session">;
+    senderName: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     type: "create-session";
+    senderName?: string | undefined;
 }, {
     type: "create-session";
+    senderName?: string | undefined;
 }>, z.ZodObject<{
     type: z.ZodLiteral<"join-session">;
     code: z.ZodString;
@@ -125,10 +128,17 @@ export declare const SignalingMessageSchema: z.ZodDiscriminatedUnion<"type", [z.
     code: string;
     targetId: string;
     senderName?: string | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"session-cancel">;
+}, "strip", z.ZodTypeAny, {
+    type: "session-cancel";
+}, {
+    type: "session-cancel";
 }>]>;
 export type SignalingMessage = z.infer<typeof SignalingMessageSchema>;
 export declare function validateMessage(message: unknown): z.SafeParseReturnType<{
     type: "create-session";
+    senderName?: string | undefined;
 } | {
     type: "join-session";
     code: string;
@@ -163,8 +173,11 @@ export declare function validateMessage(message: unknown): z.SafeParseReturnType
     code: string;
     targetId: string;
     senderName?: string | undefined;
+} | {
+    type: "session-cancel";
 }, {
     type: "create-session";
+    senderName?: string | undefined;
 } | {
     type: "join-session";
     code: string;
@@ -199,6 +212,8 @@ export declare function validateMessage(message: unknown): z.SafeParseReturnType
     code: string;
     targetId: string;
     senderName?: string | undefined;
+} | {
+    type: "session-cancel";
 }>;
 export type ServerMessage = {
     type: 'session-created';
@@ -207,6 +222,7 @@ export type ServerMessage = {
 } | {
     type: 'session-joined';
     code: string;
+    senderName?: string;
 } | {
     type: 'peer-joined';
 } | {

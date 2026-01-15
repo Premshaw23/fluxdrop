@@ -6,6 +6,7 @@ interface Session {
   code: string;
   sender: WebSocket;
   receiver?: WebSocket;
+  senderName?: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -54,12 +55,13 @@ export class SessionManager {
     throw new Error('Unable to generate unique session code');
   }
 
-  async createSession(code: string, sender: WebSocket): Promise<Session> {
+  async createSession(code: string, sender: WebSocket, senderName?: string): Promise<Session> {
     const now = Date.now();
     const ttl = Math.floor(this.SESSION_TIMEOUT / 1000);
     const session: Session = {
       code,
       sender,
+      ...(senderName ? { senderName } : {}),
       createdAt: now,
       expiresAt: now + this.SESSION_TIMEOUT
     };

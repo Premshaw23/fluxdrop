@@ -3,6 +3,7 @@ interface Session {
     code: string;
     sender: WebSocket;
     receiver?: WebSocket;
+    senderName?: string;
     createdAt: number;
     expiresAt: number;
 }
@@ -14,7 +15,7 @@ export declare class SessionManager {
     private redis;
     constructor();
     generateCode(): Promise<string>;
-    createSession(code: string, sender: WebSocket): Promise<Session>;
+    createSession(code: string, sender: WebSocket, senderName?: string): Promise<Session>;
     getSession(code: string): Session | undefined;
     addReceiver(code: string, receiver: WebSocket): Promise<boolean>;
     removeClient(code: string, role: 'sender' | 'receiver'): Promise<void>;

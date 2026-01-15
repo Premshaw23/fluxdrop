@@ -10,7 +10,7 @@ const QRCode = dynamic(
 );
 
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Upload, Copy, Check, Wifi } from "lucide-react";
+import { ArrowLeft, Upload, Copy, Check, Wifi, User, Link as LinkIcon } from "lucide-react";
 import Link from "next/link";
 import NearbyDevices from "@/components/NearbyDevices";
 import { SignalingClient } from "@/lib/signaling/SignalingClient";
@@ -21,6 +21,8 @@ import {
   formatSpeed,
   formatTime,
 } from "@/lib/transfer/FileTransfer";
+import UserIdentityDisplay from "@/components/UserIdentityDisplay";
+import { useUserStore } from "@/lib/store";
 import {
   generateECDHKeyPair,
   exportPublicKey,
@@ -32,6 +34,13 @@ type Step = "select" | "waiting" | "connected" | "transferring" | "complete";
 
 export default function SendPage() {
   const router = useRouter();
+  
+  // User Identity
+  const { name, ensureName } = useUserStore();
+  
+  useEffect(() => {
+    ensureName();
+  }, [ensureName]);
 
   // State management
   const [step, setStep] = useState<Step>("select");
@@ -861,24 +870,38 @@ export default function SendPage() {
 
   // FULL INTEGRATION - Replace your entire return statement with this:
   return (
-    <div className="min-h-screen bg-linear-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-linear-to-br from-white via-blue-50 to-purple-50">
+      <style jsx>{`
+         @keyframes pulse-ring {
+           0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(147, 51, 234, 0.7); }
+           70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(147, 51, 234, 0); }
+           100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(147, 51, 234, 0); }
+         }
+         .animate-pulse-ring {
+           animation: pulse-ring 2s infinite;
+         }
+      `}</style>
+      
       {/* Header */}
       <header className="border-b bg-white/60 backdrop-blur-md shadow-sm sticky top-0 z-20">
-        <div className="container mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <Link
             href="/"
-            className="inline-flex items-center gap-2 text-gray-700 hover:text-gray-900"
+            className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 font-semibold transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
-          <div className="flex items-center gap-2">
-            {isOffline && (
-              <span className="text-red-600 font-semibold flex items-center gap-1">
+          <div className="flex items-center gap-2 sm:gap-4">
+             {isOffline && (
+              <span className="text-red-600 font-semibold flex items-center gap-1 text-sm animate-pulse">
                 <Wifi className="w-4 h-4" />
                 Offline
               </span>
             )}
+            <div className="hidden sm:block">
+               <UserIdentityDisplay />
+            </div>
           </div>
         </div>
       </header>
@@ -888,16 +911,16 @@ export default function SendPage() {
         <div className="max-w-2xl mx-auto">
           {/* Error Messages */}
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow">
-              <div className="font-bold text-lg mb-1">{error}</div>
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow animate-shake flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="font-bold text-sm flex-1">{error}</div>
               {filesRef.current.length > 0 &&
                 files.length > 0 &&
                 !transferCompleteRef.current && (
                   <button
                     onClick={handleRetry}
-                    className="mt-3 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
+                    className="w-full sm:w-auto bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 transition-colors font-semibold shadow text-sm whitespace-nowrap"
                   >
-                    Retry
+                    Retry Transfer
                   </button>
                 )}
             </div>
@@ -905,12 +928,12 @@ export default function SendPage() {
 
           {/* Resume Banner */}
           {resumeAvailable && (
-            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 flex flex-col items-center">
-              <div className="font-semibold mb-2">Transfer interrupted</div>
+            <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
+              <div className="font-semibold text-sm">Connection interrupted</div>
               <button
                 onClick={handleResume}
                 disabled={resumeInProgress}
-                className="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 font-semibold disabled:opacity-50"
+                className="w-full sm:w-auto bg-amber-500 text-white px-4 py-2 rounded hover:bg-amber-600 font-semibold disabled:opacity-50 transition-colors shadow text-sm"
               >
                 {resumeInProgress ? "Resuming..." : "Resume Transfer"}
               </button>
@@ -919,44 +942,49 @@ export default function SendPage() {
 
           {/* SELECT STEP */}
           {step === "select" && (
-            <div className="bg-white rounded-2xl shadow-2xl p-4 sm:p-8">
+            <div className="bg-white/80 backdrop-blur-xl rounded-vxl sm:rounded-3xl shadow-2xl p-6 sm:p-10 border border-white/50 animate-fade-in">
               <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-linear-to-br from-blue-200 via-blue-100 to-purple-200 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
-                  <Upload className="w-12 h-12 text-blue-600" />
+                <div className="w-20 h-20 bg-linear-to-tr from-blue-400 to-purple-500 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg shadow-purple-500/20 animate-pop-in">
+                  <Upload className="w-10 h-10 text-white" />
                 </div>
-                <h2 className="text-3xl font-extrabold text-gray-900 mb-2 tracking-tight">
+                <div className="sm:hidden mb-6 flex justify-center">
+                    <UserIdentityDisplay />
+                </div>
+                <h2 className="text-3xl font-black text-gray-800 mb-2 tracking-tight">
                   Send Files
                 </h2>
-                <p className="text-gray-600 text-base">
-                  Choose files or folders to share instantly
+                <p className="text-gray-500 text-base max-w-md mx-auto">
+                  Select files or folders to share secure & fast with devices nearby.
                 </p>
               </div>
 
               {/* Send as ZIP Option */}
-              <div className="flex flex-col gap-1 mb-4">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-1 mb-6 bg-blue-50/50 p-3 rounded-xl border border-blue-100">
+                <div className="flex items-center gap-3">
                   <input
                     id="sendAsZip"
                     type="checkbox"
                     checked={sendAsZip}
                     onChange={(e) => setSendAsZip(e.target.checked)}
-                    className="accent-blue-600"
+                    className="w-5 h-5 accent-purple-600 rounded cursor-pointer"
                   />
-                  <label
-                    htmlFor="sendAsZip"
-                    className="text-sm text-gray-700 cursor-pointer"
-                  >
-                    <span className="font-semibold">Send as ZIP</span>
-                  </label>
-                </div>
-                <div className="text-xs text-gray-500 ml-6">
-                  For better folder structure, you can choose ZIP.
+                  <div className="flex flex-col">
+                      <label
+                        htmlFor="sendAsZip"
+                        className="text-sm font-bold text-gray-700 cursor-pointer"
+                      >
+                        Pack as ZIP Archive
+                      </label>
+                      <span className="text-xs text-gray-500">
+                        Preserves folder structure and downloads as a single file.
+                      </span>
+                  </div>
                 </div>
               </div>
 
               {/* File Selection Buttons */}
               <div className="flex flex-col sm:flex-row gap-4 mb-4">
-                <label className="block flex-1">
+                <label className="block flex-1 cursor-pointer group">
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -964,17 +992,13 @@ export default function SendPage() {
                     onChange={handleFileSelect}
                     className="hidden"
                   />
-                  <button
-                    type="button"
-                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold shadow"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <Upload className="w-5 h-5 mr-2 inline-block" />
-                    {files.length > 0 ? "Add More Files" : "Select Files"}
-                  </button>
+                  <div className="w-full bg-gray-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-all font-bold shadow-lg shadow-gray-200 group-hover:scale-[1.02] flex items-center justify-center gap-2">
+                    <Upload className="w-5 h-5" />
+                    {files.length > 0 ? "Add Files" : "Select Files"}
+                  </div>
                 </label>
 
-                <label className="block flex-1">
+                <label className="block flex-1 cursor-pointer group">
                   <input
                     type="file"
                     multiple
@@ -987,59 +1011,50 @@ export default function SendPage() {
                       }
                     }}
                   />
-                  <button
-                    type="button"
-                    className="w-full bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition-colors font-semibold shadow"
-                    onClick={(e) => {
-                      const input =
-                        e.currentTarget.parentElement?.querySelector(
-                          'input[type="file"]'
-                        ) as HTMLInputElement;
-                      input?.click();
-                    }}
-                  >
-                    <Upload className="w-5 h-5 mr-2 inline-block" />
+                  <div className="w-full bg-white text-gray-900 border-2 border-gray-100 py-4 px-6 rounded-xl hover:border-purple-200 hover:bg-purple-50 transition-all font-bold group-hover:scale-[1.02] flex items-center justify-center gap-2">
+                    <span className="text-2xl leading-none">📁</span>
                     {files.length > 0 ? "Add Folder" : "Select Folder"}
-                  </button>
+                  </div>
                 </label>
               </div>
 
               {/* Drag & Drop Zone */}
               <div
-                className={`border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-colors ${
+                className={`border-3 border-dashed rounded-2xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-300 ${
                   isDragActive
-                    ? "border-blue-500 bg-blue-100 shadow-lg"
-                    : "border-gray-300 hover:border-blue-500 hover:bg-blue-50"
+                    ? "border-purple-500 bg-purple-50 scale-[1.01] shadow-xl"
+                    : "border-gray-200 hover:border-purple-300 hover:bg-gray-50/50"
                 }`}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
               >
-                <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
-                <p className="text-lg text-gray-700 mb-2 font-semibold">
+                <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 transition-colors ${isDragActive ? 'bg-purple-100' : 'bg-gray-100'}`}>
+                    <Upload className={`w-8 h-8 ${isDragActive ? 'text-purple-600' : 'text-gray-400'}`} />
+                </div>
+                <p className="text-lg text-gray-700 mb-1 font-bold">
                   {files.length > 0
-                    ? "Add more files or folders"
-                    : "Drag files or folders here"}
+                    ? "Drop more files here"
+                    : "Drag & Drop files here"}
                 </p>
-                <p className="text-sm text-gray-500">Any file up to 2GB each</p>
+                <p className="text-xs text-gray-400 font-medium tracking-wide uppercase">Max 2GB per file</p>
               </div>
 
               {/* Selected Files Grid */}
               {files.length > 0 && (
-                <>
-                  <div className="mt-6 flex justify-between items-center mb-2">
-                    <h3 className="text-lg font-bold text-gray-900">
-                      Selected Files{" "}
-                      <span className="text-blue-600">({files.length})</span>
+                <div className="mt-8 animate-slide-up">
+                  <div className="flex justify-between items-end mb-4 px-1">
+                    <h3 className="text-lg font-bold text-gray-800">
+                      Selected <span className="text-purple-600">{files.length}</span>
                     </h3>
                     <button
                       onClick={removeAllFiles}
-                      className="text-sm text-red-600 hover:text-red-700 font-semibold px-3 py-1 rounded border border-red-300 hover:bg-red-50 transition shadow"
+                      className="text-xs font-bold text-red-500 hover:text-red-600 hover:underline px-2 py-1"
                     >
-                      Remove All
+                      Clear All
                     </button>
                   </div>
-                  <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {files.map((f, idx) => {
                       const isImage = f.type.startsWith("image/");
                       const isVideo = f.type.startsWith("video/");
@@ -1048,65 +1063,54 @@ export default function SendPage() {
                       return (
                         <div
                           key={f.name + f.size + idx}
-                          className="bg-linear-to-br from-gray-50 to-blue-50 rounded-lg p-4 flex flex-col items-center shadow relative border border-gray-200 hover:shadow-lg transition-all"
+                          className="group relative bg-white rounded-xl p-3 flex flex-col items-center shadow-sm border border-gray-100 hover:shadow-md transition-all hover:border-purple-200"
                         >
                           <button
                             onClick={() => removeFile(idx)}
-                            className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600 transition text-xs font-bold shadow"
+                            className="absolute -top-2 -right-2 bg-white text-red-500 rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-50 border border-gray-200 transition shadow-sm z-10 opacity-0 group-hover:opacity-100 scale-75 group-hover:scale-100"
                             aria-label="Remove file"
                           >
                             ×
                           </button>
 
                           {/* Image Preview */}
-                          {isImage ? (
-                            <img
-                              src={URL.createObjectURL(f)}
-                              alt={f.name}
-                              className="w-20 h-20 object-cover rounded mb-2 border shadow"
-                              loading="lazy"
-                              onLoad={(e) =>
-                                URL.revokeObjectURL(
-                                  (e.target as HTMLImageElement).src
-                                )
-                              }
-                            />
-                          ) : isVideo ? (
-                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                              <span className="text-2xl">🎬</span>
-                            </div>
-                          ) : isAudio ? (
-                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                              <span className="text-2xl">🎵</span>
-                            </div>
-                          ) : (
-                            <div className="w-20 h-20 flex items-center justify-center bg-gray-200 rounded mb-2">
-                              <span className="text-xs text-gray-500">
-                                📄{" "}
-                                {f.type
-                                  ? f.type.split("/")[1]?.toUpperCase()
-                                  : "File"}
-                              </span>
-                            </div>
-                          )}
+                          <div className="aspect-square w-full rounded-lg bg-gray-50 flex items-center justify-center mb-3 overflow-hidden">
+                            {isImage ? (
+                                <img
+                                src={URL.createObjectURL(f)}
+                                alt={f.name}
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                                onLoad={(e) =>
+                                    URL.revokeObjectURL(
+                                    (e.target as HTMLImageElement).src
+                                    )
+                                }
+                                />
+                            ) : (
+                                <span className="text-3xl opacity-50">
+                                    {isVideo ? '🎬' : isAudio ? '🎵' : '📄'}
+                                </span>
+                            )}
+                          </div>
 
-                          <span className="font-medium text-gray-900 break-all text-center text-sm mb-1 line-clamp-2">
+                          <span className="font-semibold text-gray-800 break-all text-center text-xs mb-0.5 line-clamp-2 w-full">
                             {f.name}
                           </span>
-                          <span className="text-xs text-gray-600">
+                          <span className="text-[10px] text-gray-400 font-medium">
                             {formatBytes(f.size)}
                           </span>
                         </div>
                       );
                     })}
                   </div>
-                </>
+                </div>
               )}
 
               {/* Nearby Devices Scanner */}
                <NearbyDevices 
                  signaling={discoveryClient}
-                 deviceName="Sender"
+                 deviceName={name || "Sender"}
                  role="sender"
                  onPair={handlePairDevice}
                />
@@ -1115,121 +1119,82 @@ export default function SendPage() {
 
           {/* WAITING STEP */}
           {step === "waiting" && (
-            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
+            <div className="bg-white rounded-3xl shadow-2xl p-6 sm:p-10 border border-gray-100">
               <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce-slow">
-                  <Wifi className="w-10 h-10 text-blue-600 animate-pulse" />
+                <div className="relative w-24 h-24 mx-auto mb-6">
+                    <div className="absolute inset-0 bg-blue-100 rounded-full animate-ping opacity-20"></div>
+                    <div className="relative w-24 h-24 bg-linear-to-tr from-blue-500 to-indigo-600 rounded-full flex items-center justify-center shadow-xl">
+                         <Wifi className="w-10 h-10 text-white animate-pulse" />
+                    </div>
                 </div>
-                <h2 className="text-3xl font-bold text-gray-900 mb-2">
-                  Share This Code
+                
+                <h2 className="text-3xl font-black text-gray-900 mb-2">
+                  Ready to Send
                 </h2>
-                <p className="text-gray-600">Waiting for receiver to join...</p>
+                <p className="text-gray-500 font-medium">Scan QR code or open link on receiver</p>
               </div>
 
               {/* Show selected files preview */}
               {files.length > 0 && (
-                <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                  <p className="text-sm text-gray-500 mb-2">Selected files:</p>
-                  <ul className="space-y-1 max-h-40 overflow-y-auto">
-                    {files.map((f, idx) => (
-                      <li
-                        key={f.name + f.size + idx}
-                        className="flex justify-between items-center text-sm"
-                      >
-                        <span className="font-semibold text-gray-900 truncate flex-1 mr-2">
-                          {f.name}
-                        </span>
-                        <span className="text-xs text-gray-600 whitespace-nowrap">
-                          {formatBytes(f.size)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="mt-2 pt-2 border-t border-gray-200">
-                    <span className="text-xs text-gray-600">
-                      Total:{" "}
-                      {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
-                    </span>
+                <div className="bg-gray-50/80 rounded-xl p-4 mb-8 border border-gray-100">
+                  <div className="flex justify-between items-center mb-2">
+                       <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Sending</span>
+                       <span className="text-xs font-bold text-gray-700 bg-white px-2 py-0.5 rounded-full shadow-sm">{files.length} files</span>
+                  </div>
+                  <div className="flex -space-x-2 overflow-hidden mb-2">
+                      {files.slice(0, 5).map((f, i) => (
+                          <div key={i} className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-gray-200 flex items-center justify-center text-xs shadow-sm">
+                             {f.type.startsWith('image') ? '🖼️' : '📄'}
+                          </div>
+                      ))}
+                      {files.length > 5 && (
+                          <div className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-gray-100 flex items-center justify-center text-[10px] font-bold text-gray-500">
+                              +{files.length - 5}
+                          </div>
+                      )}
+                  </div>
+                  <div className="text-xs text-gray-500 font-medium">
+                      Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
                   </div>
                 </div>
               )}
 
-              <div className="bg-blue-50 rounded-xl p-4 sm:p-6 mb-6 flex flex-col items-center w-full max-w-xs sm:max-w-md mx-auto">
-                <p className="text-sm text-gray-600 mb-2 text-center">
-                  Transfer Code
-                </p>
-                <div className="text-5xl sm:text-6xl font-bold text-blue-600 text-center tracking-wider mb-4 select-all">
-                  {sessionCode || "------"}
+              <div className="bg-white border-2 border-indigo-100 rounded-2xl p-6 mb-8 flex flex-col items-center w-full max-w-xs sm:max-w-sm mx-auto shadow-sm">
+                
+                <div className="text-5xl font-mono font-bold text-indigo-600 text-center tracking-widest mb-6 select-all">
+                  {sessionCode || "......"}
                 </div>
                 {sessionCode && (
                   <>
-                    <div className="mb-4 flex flex-col items-center w-full">
-                      <div className="w-full flex justify-center">
-                        <QRCode
-                          value={`${
-                            typeof window !== "undefined"
-                              ? window.location.origin
-                              : ""
-                          }/receive?code=${sessionCode}`}
-                          size={
-                            typeof window !== "undefined" &&
-                            window.innerWidth < 400
-                              ? 180
-                              : 220
-                          }
-                          style={{
-                            width: "100%",
-                            height: "auto",
-                            maxWidth: 220,
-                            minWidth: 120,
-                          }}
-                        />
-                      </div>
-                      <div className="text-xs text-gray-500 mt-2 break-all text-center w-full max-w-full select-all">
-                        {`${
+                    <div className="mb-6 flex flex-col items-center w-full bg-white p-2 rounded-xl">
+                      <QRCode
+                        value={`${
                           typeof window !== "undefined"
                             ? window.location.origin
                             : ""
                         }/receive?code=${sessionCode}`}
-                      </div>
+                        size={200}
+                        className="rounded-lg"
+                      />
                     </div>
-                    <div className="flex flex-col sm:flex-row gap-2 w-full mb-4">
+                    
+                    <div className="grid grid-cols-2 gap-3 w-full">
                       <button
                         onClick={copyCode}
-                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                        className="col-span-1 bg-indigo-50 text-indigo-700 py-3 rounded-xl hover:bg-indigo-100 transition-colors font-bold text-sm flex flex-col items-center justify-center gap-1"
                       >
-                        {copyStatus === "code" ? (
-                          <>
-                            <Check className="w-5 h-5" />
-                            Code Copied!
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-5 h-5" />
-                            Copy Code
-                          </>
-                        )}
+                         <Copy className="w-4 h-4" />
+                         {copyStatus === "code" ? "Copied" : "Copy Code"}
                       </button>
-                    </div>
-                    <div className="flex flex-col sm:flex-row gap-2 w-full">
                       <button
                         onClick={copyLink}
-                        className="flex-1 bg-white border border-blue-200 text-blue-600 py-3 px-4 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                        className="col-span-1 bg-indigo-50 text-indigo-700 py-3 rounded-xl hover:bg-indigo-100 transition-colors font-bold text-sm flex flex-col items-center justify-center gap-1"
                       >
-                        {copyStatus === "link" ? (
-                          <>
-                            <Check className="w-5 h-5" />
-                            Link Copied!
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-5 h-5" />
-                            Copy Link
-                          </>
-                        )}
+                         <LinkIcon className="w-4 h-4" />
+                         {copyStatus === "link" ? "Copied" : "Copy Link"}
                       </button>
-                      
-                       <button
+                    </div>
+                     <button
                         onClick={() => {
                           const url = `${
                             typeof window !== "undefined"
@@ -1246,90 +1211,96 @@ export default function SendPage() {
                             copyLink();
                           }
                         }}
-                        className="flex-1 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
+                        className="w-full mt-3 bg-indigo-600 text-white py-3 px-4 rounded-xl hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 font-bold shadow-lg shadow-indigo-200"
                       >
                          Share Link
                       </button>
-                    </div>
-
                   </>
                 )}
               </div>
 
-
-
-              <p className="text-center text-sm text-gray-500">
-                Code expires in 5 minutes
+              <p className="text-center text-xs text-gray-400 font-medium">
+                Code expires in 5 minutes • Keep this tab open
               </p>
             </div>
           )}
 
-
-
           {/* CONNECTED STEP */}
           {step === "connected" && (
-            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <div className="bg-white rounded-3xl shadow-xl p-8 sm:p-12 text-center animate-fade-in">
+              <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
                 <Check className="w-10 h-10 text-green-600" />
               </div>
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">
+              <h2 className="text-3xl font-black text-gray-900 mb-2">
                 Connected!
               </h2>
-              <p className="text-gray-600">Establishing secure connection...</p>
+              <p className="text-gray-600 font-medium">Secure handshake established.</p>
             </div>
           )}
 
           {/* TRANSFERRING STEP */}
           {step === "transferring" && (
-            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8">
-              <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">
-                Sending Files
-              </h2>
+            <div className="bg-white rounded-3xl shadow-xl p-6 sm:p-10 border border-gray-100">
+               <div className="flex items-center justify-between mb-8">
+                  <h2 className="text-2xl font-black text-gray-900">
+                    Sending Files...
+                  </h2>
+                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
+               </div>
+              
               <div className="space-y-4">
-                {files.map((f, idx) => (
+                {files.map((f, idx) => {
+                   const progress = progressList[idx] || 0;
+                   const isComplete = progress === 100;
+                   
+                   return (
                   <div
                     key={f.name + f.size}
-                    className="bg-gray-50 rounded-lg p-4"
+                    className="bg-gray-50 rounded-xl p-4 border border-gray-100"
                   >
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="font-semibold text-gray-900 break-all">
-                        {f.name}
-                      </span>
-                      <span className="text-sm text-gray-600">
-                        {formatBytes(f.size)}
-                      </span>
+                    <div className="flex justify-between items-center mb-3">
+                      <div className="flex items-center gap-3 overflow-hidden">
+                          <div className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${isComplete ? 'bg-green-100 text-green-600' : 'bg-blue-100 text-blue-600'}`}>
+                              {isComplete ? <Check className="w-5 h-5" /> : <Upload className="w-5 h-5" />}
+                          </div>
+                          <div className="min-w-0">
+                              <div className="font-bold text-gray-900 text-sm truncate">{f.name}</div>
+                              <div className="text-xs text-gray-500">{formatBytes(f.size)}</div>
+                          </div>
+                      </div>
+                      <div className="text-right">
+                         <div className="text-sm font-bold text-gray-900">{Math.round(progress)}%</div>
+                         <div className="text-xs text-gray-500 font-mono">{formatSpeed(speedList[idx] || 0)}</div>
+                      </div>
                     </div>
-                    <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                    
+                    <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-blue-600 transition-all"
-                        style={{ width: `${progressList[idx] || 0}%` }}
+                        className={`h-full transition-all duration-300 ease-out rounded-full ${isComplete ? 'bg-green-500' : 'bg-indigo-600'}`}
+                        style={{ width: `${progress}%` }}
                       />
                     </div>
-                    <div className="flex justify-between text-xs text-gray-500 mt-1">
-                      <span>{Math.round(progressList[idx] || 0)}%</span>
-                      <span>{formatSpeed(speedList[idx] || 0)}</span>
-                    </div>
                   </div>
-                ))}
+                )})}
               </div>
             </div>
           )}
 
           {/* COMPLETE STEP */}
           {step === "complete" && (
-            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-8 text-center">
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Check className="w-10 h-10 text-green-600" />
+            <div className="bg-white rounded-3xl shadow-2xl p-8 sm:p-12 text-center animate-pop-in">
+              <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Check className="w-12 h-12 text-green-600" />
               </div>
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">
-                Transfer Complete!
+              <h2 className="text-3xl font-black text-gray-900 mb-2">
+                All Done!
               </h2>
-              <p className="text-gray-600 mb-6">
-                Your files were sent successfully
+              <p className="text-gray-600 mb-8 font-medium">
+                Successfully sent {files.length} {files.length === 1 ? 'file' : 'files'}.
               </p>
               <button
                 onClick={reset}
-                className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+                className="w-full bg-gray-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-colors font-bold shadow-lg"
               >
                 Send More Files
               </button>
@@ -1340,23 +1311,23 @@ export default function SendPage() {
 
       {/* FLOATING ACTION BAR */}
       {files.length > 0 && step === "select" && (
-        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t shadow-lg animate-slide-up">
-          <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
-            <div className="text-sm flex-1 min-w-0">
-              <span className="font-semibold text-gray-900">
-                {files.length} {files.length === 1 ? "file" : "files"}
+        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white/80 backdrop-blur-xl border-t border-gray-200 shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] animate-slide-up">
+          <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between gap-4">
+            <div className="flex flex-col min-w-0">
+              <span className="font-bold text-gray-900 text-sm">
+                {files.length} {files.length === 1 ? "file" : "files"} selected
               </span>
-              <span className="text-gray-500 ml-2 truncate">
-                {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
+              <span className="text-xs text-gray-500 truncate font-medium">
+                Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
               </span>
             </div>
             <button
               onClick={handleSend}
               disabled={!readyToSend}
-              className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed shadow-lg flex items-center gap-2 whitespace-nowrap"
+              className="bg-purple-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-purple-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed shadow-lg hover:shadow-purple-200 flex items-center gap-2 whitespace-nowrap active:scale-95 transform"
             >
-              <Upload className="w-5 h-5" />
-              Send
+              Send Now
+              <User className="w-4 h-4 ml-1 opacity-70" />
             </button>
           </div>
         </div>

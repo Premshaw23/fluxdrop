@@ -2,7 +2,8 @@
 import { z } from 'zod';
 // Message schemas
 const CreateSessionSchema = z.object({
-    type: z.literal('create-session')
+    type: z.literal('create-session'),
+    senderName: z.string().optional()
 });
 const JoinSessionSchema = z.object({
     type: z.literal('join-session'),
@@ -46,6 +47,9 @@ const DiscoveryInviteSchema = z.object({
     code: z.string(),
     senderName: z.string().optional(),
 });
+const SessionCancelSchema = z.object({
+    type: z.literal("session-cancel"),
+});
 export const SignalingMessageSchema = z.discriminatedUnion("type", [
     CreateSessionSchema,
     JoinSessionSchema,
@@ -56,6 +60,7 @@ export const SignalingMessageSchema = z.discriminatedUnion("type", [
     DiscoveryAnnounceSchema,
     DiscoveryListSchema,
     DiscoveryInviteSchema,
+    SessionCancelSchema,
 ]);
 export function validateMessage(message) {
     return SignalingMessageSchema.safeParse(message);

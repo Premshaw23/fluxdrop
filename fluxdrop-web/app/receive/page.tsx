@@ -15,6 +15,8 @@ import JSZip from "jszip";
 import { ArrowLeft, Download, Check } from "lucide-react";
 import Link from "next/link";
 import { SignalingClient } from "@/lib/signaling/SignalingClient";
+import UserIdentityDisplay from "@/components/UserIdentityDisplay";
+import { useUserStore } from "@/lib/store";
 import { RTCConnection } from "@/lib/webrtc/RTCConnection";
 import {
   FileTransferReceiver,
@@ -84,9 +86,16 @@ export default function ReceivePage() {
 
   // Discovery State
   const [signalingClient, setSignalingClient] = useState<SignalingClient | null>(null);
+  const { name, ensureName } = useUserStore();
+  
+  // Ensure we have a name
+  useEffect(() => {
+    ensureName();
+  }, [ensureName]);
+
   const { peers } = useDiscovery({
      signaling: signalingClient,
-     deviceName: "Receiver", // We could randomize this or let user pick
+     deviceName: name || "FluxDrop Receiver",
      deviceType: "receiver"
   });
 
@@ -687,6 +696,9 @@ export default function ReceivePage() {
               Offline
             </span>
           )}
+          <div className="hidden sm:block">
+            <UserIdentityDisplay />
+          </div>
         </div>
       </header>
 
@@ -727,6 +739,9 @@ export default function ReceivePage() {
               <div className="text-center mb-8">
                 <div className="w-20 h-20 bg-linear-to-br from-purple-200 via-purple-50 to-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg animate-pop-in">
                   <Download className="w-12 h-12 text-purple-500" />
+                </div>
+                <div className="sm:hidden mb-4 flex justify-center">
+                    <UserIdentityDisplay />
                 </div>
                 <h2 className="text-3xl font-extrabold mb-2 text-purple-500 tracking-tight">
                   Receive Files
