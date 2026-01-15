@@ -10,14 +10,14 @@ interface NearbyDevicesProps {
 }
 
 export default function NearbyDevices({ signaling, deviceName, onPair, role }: NearbyDevicesProps) {
-  // Only show nearby devices UI for the receiver side
-  if (role === 'sender') return null;
-
   const { peers, isDiscovering } = useDiscovery({
     signaling,
     deviceName,
     deviceType: 'browser'
   });
+
+  // Filter to only show receiver devices
+  const receiverPeers = peers.filter(peer => peer.type === 'receiver');
 
   const getDeviceIcon = (type: string) => {
     switch (type?.toLowerCase()) {
@@ -27,7 +27,7 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
     }
   };
 
-  if (peers.length === 0 && !isDiscovering) return null;
+  if (receiverPeers.length === 0 && !isDiscovering) return null;
 
   return (
     <div className="mt-8 py-5 border-t-2 border-gray-200 animate-fade-in bg-gradient-to-br from-white to-purple-50/30 backdrop-blur-sm rounded-2xl p-3 shadow-md">
@@ -40,19 +40,19 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
         ) : (
             <div className="h-3 w-3 rounded-full bg-green-500 shadow-sm"></div>
         )}
-        Nearby Devices {peers.length > 0 && <span className="bg-purple-600 text-white px-2.5 py-0.5 rounded-full text-xs font-bold shadow-sm">{peers.length}</span>}
+        Nearby Receivers {receiverPeers.length > 0 && <span className="bg-purple-600 text-white px-2.5 py-0.5 rounded-full text-xs font-bold shadow-sm">{receiverPeers.length}</span>}
       </h3>
       
-      {peers.length === 0 ? (
+      {receiverPeers.length === 0 ? (
          <div className="bg-white rounded-2xl p-8 text-center border-2 border-dashed border-purple-300 shadow-sm">
             <div className="animate-pulse flex justify-center mb-3">
                 <div className="h-10 w-10 bg-gradient-to-br from-purple-100 to-purple-200 rounded-full"></div>
             </div>
-            <p className="text-gray-600 text-sm font-semibold">Scanning for devices nearby...</p>
+            <p className="text-gray-600 text-sm font-semibold">Scanning for receivers nearby...</p>
          </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
-          {peers.map((peer) => (
+          {receiverPeers.map((peer) => (
             <button
               key={peer.id}
               onClick={() => onPair(peer)}
@@ -72,13 +72,13 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
                     {peer.name || 'Unknown Device'}
                 </div>
                 <div className="text-xs text-gray-600 truncate font-medium mt-0.5">
-                    {peer.model || (peer.type === 'mobile' ? 'Mobile Device' : 'Desktop')}
+                    {peer.model || 'Ready to receive'}
                 </div>
               </div>
               
               {/* Arrow - always visible on mobile, animated on hover */}
               <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-purple-600 text-white shadow-md group-hover:bg-purple-700 group-hover:shadow-lg transition-all">
-                  <div className="sr-only">{'Pair with this device'}</div>
+                 <div className="sr-only">Send to this device</div>
                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M5 12h14M12 5l7 7-7 7"/>
                  </svg>
