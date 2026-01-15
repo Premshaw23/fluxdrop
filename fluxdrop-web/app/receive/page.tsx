@@ -310,19 +310,36 @@ export default function ReceivePage() {
           setStep("receiving");
         };
 
-        // Progress updates
+        // Key fix in ReceivePage.tsx
+
+        // In the setupTransferReceiver function, update the onProgress handler:
+
+        // ✅ FIXED: Progress updates now use fileIndex from progress object
         transfer.onProgress = (prog: any) => {
-          const idx = fileIndexRef.current;
+          // Use fileIndex from progress if available, otherwise fall back to fileIndexRef
+          const idx =
+            prog.fileIndex !== undefined
+              ? prog.fileIndex
+              : fileIndexRef.current;
+
+          console.log(
+            `[ReceivePage] Progress for file ${idx}: ${prog.percentage.toFixed(
+              1
+            )}%`
+          );
+
           setProgressList((prev) => {
             const updated = [...prev];
             updated[idx] = prog.percentage;
             return updated;
           });
+
           setSpeedList((prev) => {
             const updated = [...prev];
             updated[idx] = prog.speed;
             return updated;
           });
+
           setTimeRemainingList((prev) => {
             const updated = [...prev];
             updated[idx] = prog.timeRemaining;
@@ -330,7 +347,7 @@ export default function ReceivePage() {
           });
         };
 
-        // File complete
+        // Also update the file complete handler to properly track the current file:
         transfer.onComplete = async (
           file: Blob,
           completedFileIndex: number
@@ -375,6 +392,10 @@ export default function ReceivePage() {
             return updated;
           });
 
+          // ✅ FIX: Update fileIndexRef BEFORE setting received files
+          // This ensures the next file's progress goes to the right index
+          fileIndexRef.current = completedFileIndex + 1;
+
           // Add file to received files and check completion
           setReceivedFiles((prev) => {
             const updated = [...prev];
@@ -415,8 +436,7 @@ export default function ReceivePage() {
 
             return updated;
           });
-
-          fileIndexRef.current++;
+          //   fileIndexRef.current++;
         };
 
         // Transfer error
