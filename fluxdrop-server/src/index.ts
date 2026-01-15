@@ -65,6 +65,9 @@ wss.on('connection', (ws: WebSocket, req) => {
     try {
       const rawMessage = JSON.parse(data.toString());
       
+      // DEBUG LOG
+      console.log('📨 Server received:', rawMessage.type);
+      
       // 🟢 DISCOVERY PROTOCOL (Strictly separated)
       // Bypasses the strict SignalingMessage validation to prevent "Invalid Message Format" errors
       if (rawMessage.type && rawMessage.type.startsWith('discovery:')) {
