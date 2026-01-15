@@ -69,9 +69,13 @@ wss.on('connection', (ws: WebSocket, req) => {
       console.log('📨 Server received:', rawMessage.type);
       
       // 🟢 DISCOVERY PROTOCOL (Strictly separated)
-      // Bypasses the strict SignalingMessage validation to prevent "Invalid Message Format" errors
       if (rawMessage.type && rawMessage.type.startsWith('discovery:')) {
-        await handleDiscoveryMessage(ws, rawMessage, ip, clientId);
+        try {
+           await handleDiscoveryMessage(ws, rawMessage, ip, clientId);
+        } catch (err: any) {
+           console.error('Discovery error:', err);
+           sendError(ws, `Discovery failed: ${err.message}`);
+        }
         return;
       }
 
