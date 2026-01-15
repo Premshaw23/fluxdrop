@@ -39,12 +39,18 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
       console.log('✅ Device announced successfully:', message.device);
     };
 
+    const handleError = (message: any) => {
+      console.error('❌ Discovery Error:', message.error);
+    };
+
     signaling.on('discovery:peers', handlePeers);
     signaling.on('discovery:announced', handleAnnounced);
+    signaling.on('error', handleError);
 
     return () => {
       signaling.off('discovery:peers');
       signaling.off('discovery:announced');
+      signaling.off('error');
     };
   }, [signaling]);
 
