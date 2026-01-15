@@ -72,7 +72,7 @@ export class FileTransferSender {
   private readonly ACK_BACKOFF_MS = [100, 200, 500, 1000, 2000];
   private ackWaitStartTime: number = 0;
   private ackWaitRetryCount: number = 0;
-  private unackedCountThreshold: number = 50;
+  private unackedCountThreshold: number = 150;
   private encryptionKey: CryptoKey | null = null;
   private files: File[] = [];
   private _fileIndex = 0;
@@ -88,9 +88,9 @@ export class FileTransferSender {
 
     // ✅ ADD: Track chunk resend attempts to prevent infinite loops
   private chunkResendCounts: Map<string, number> = new Map();
-  private readonly MAX_CHUNK_RESENDS = 10;
+  private readonly MAX_CHUNK_RESENDS = 50;
   private lastResendTime: Map<string, number> = new Map();
-  private readonly MIN_RESEND_INTERVAL_MS = 500; // Don't resend same chunk within 500ms
+  private readonly MIN_RESEND_INTERVAL_MS = 1000; // Don't resend same chunk within 1s
 
   public onProgress?: (progress: TransferProgress) => void;
   public onComplete?: () => void;
@@ -264,7 +264,14 @@ export class FileTransferSender {
     }
     
     if (chunksToResend.length === 0) {
-      console.warn(`[FileTransferSender] No chunks to resend after filtering`);
+      return;
+    }
+
+    // Check backpressure before resending batch
+    const buffered = this.getBufferedAmount();
+    if (buffered > CHUNK_SIZE * 5) {
+      console.warn(`[FileTransferSender] High buffered amount (${formatBytes(buffered)}), delaying resends`);
+      setTimeout(() => this.handleResumeRequest(missingChunks), 1000);
       return;
     }
 
@@ -306,8 +313,10 @@ export class FileTransferSender {
         
         console.log(`[FileTransferSender] Resent chunk ${idx} for file ${this._fileIndex} (attempt ${this.chunkResendCounts.get(key)})`);
         
-        // ✅ ADD: Small delay between resends to prevent flooding
-        await new Promise(resolve => setTimeout(resolve, 50));
+        // ✅ ADD: Varying delay between resends based on buffered amount
+        const currentBuffered = this.getBufferedAmount();
+        const resendDelay = currentBuffered > CHUNK_SIZE ? 100 : 30;
+        await new Promise(resolve => setTimeout(resolve, resendDelay));
       }
     }
   }
@@ -672,6 +681,7 @@ export class FileTransferReceiver {
     startTime: number;
     completeMessageReceived: boolean;
     completeWaitStartTime: number;
+    completeFileInProgress: boolean; // ✅ ADD: Prevent double completion
   }> = new Map();
   
   private readonly RECEIVER_WAIT_TIMEOUT_MS = 60000;
@@ -800,6 +810,7 @@ export class FileTransferReceiver {
       startTime: Date.now(),
       completeMessageReceived: false,
       completeWaitStartTime: 0,
+      completeFileInProgress: false,
     });
 
     this.onMetadata?.(metadata);
@@ -888,8 +899,8 @@ export class FileTransferReceiver {
       }
     }
     
-    if (missingChunks.length > 0 && missingChunks.length <= 10) { // Only if few chunks missing
-      console.log(`[FileTransferReceiver] Requesting ${missingChunks.length} remaining chunks`);
+    if (missingChunks.length > 0 && missingChunks.length <= 5) { // Only if very few chunks missing
+      console.log(`[FileTransferReceiver] Requesting ${missingChunks.length} remaining chunks during stream`);
       this.sendControlMessage({
         type: "resume-request",
         missingChunks,
@@ -968,14 +979,14 @@ private async handleComplete(fileIndex: number) {
       fileIndex,
     });
 
-    // ✅ NEW: Schedule a retry check (but only if chunks don't arrive naturally)
-    const retryDelay = Math.min(2000, 500 + (elapsed / 10)); // Exponential-ish backoff
+    // ✅ FIX: Use a more conservative backoff for retry check
+    const retryDelay = Math.min(5000, 2000 + (elapsed / 5)); 
     console.log(`[FileTransferReceiver] Will check again in ${retryDelay}ms if needed (elapsed: ${elapsed}ms)`);
     
     setTimeout(() => {
       // Only retry if still incomplete
       const currentState = this.fileStates.get(fileIndex);
-      if (!currentState) return; // File completed and cleaned up
+      if (!currentState || currentState.completeFileInProgress) return; // File completed or clean up
       
       const currentReceived = currentState.receivedChunkBitmap.filter((b) => b).length;
       if (currentReceived < currentState.metadata.chunks) {
@@ -987,6 +998,8 @@ private async handleComplete(fileIndex: number) {
 }
 
   private async completeFile(fileIndex: number, state: any) {
+    if (state.completeFileInProgress) return;
+    state.completeFileInProgress = true;
     console.log(`[FileTransferReceiver] Completing file ${fileIndex}`);
 
     // Build chunks array
