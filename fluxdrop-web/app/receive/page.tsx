@@ -32,6 +32,7 @@ import {
   deriveSharedSecret,
 } from "@/lib/crypto/crypto";
 import { useDiscovery } from "@/hooks/useDiscovery";
+import QRScannerModal from "./QRScanner";
 
 type Step = "enter-code" | "connecting" | "receiving" | "complete";
 
@@ -1108,14 +1109,12 @@ function ScanQrSection({
       </button>
 
       {showScanner && (
-        <div className="w-full max-w-xs mx-auto">
-          <div className="aspect-square rounded-lg overflow-hidden border-2 border-purple-200">
-            <QRScanner onResult={handleResult} />
-          </div>
+        <>
+          <QRScannerModal onResult={handleResult} onClose={() => setShowScanner(false)} />
           <p className="text-xs text-gray-500 mt-2 text-center">
             Point camera at QR code
           </p>
-        </div>
+        </>
       )}
     </div>
   );

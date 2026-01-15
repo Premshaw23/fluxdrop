@@ -27,52 +27,56 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
   if (peers.length === 0 && !isDiscovering) return null;
 
   return (
-    <div className="mt-8 pt-8 border-t border-gray-100/50 animate-fade-in">
-      <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+    <div className="mt-8 py-5 border-t-2 border-gray-200 animate-fade-in bg-gradient-to-br from-white to-purple-50/30 backdrop-blur-sm rounded-2xl p-3 shadow-md">
+      <h3 className="text-sm font-bold text-gray-700 uppercase tracking-wide mb-5 flex items-center gap-2">
         {isDiscovering ? (
-           <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span>
+           <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-500 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-purple-600"></span>
             </span>
         ) : (
-            <div className="h-2 w-2 rounded-full bg-green-500"></div>
+            <div className="h-3 w-3 rounded-full bg-green-500 shadow-sm"></div>
         )}
-        Nearby Devices {peers.length > 0 && <span className="bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full text-[10px] font-bold">{peers.length}</span>}
+        Nearby Devices {peers.length > 0 && <span className="bg-purple-600 text-white px-2.5 py-0.5 rounded-full text-xs font-bold shadow-sm">{peers.length}</span>}
       </h3>
       
       {peers.length === 0 ? (
-         <div className="bg-white/50 rounded-xl p-6 text-center border border-dashed border-gray-200">
-            <div className="animate-pulse flex justify-center mb-2">
-                <div className="h-8 w-8 bg-gray-100 rounded-full"></div>
+         <div className="bg-white rounded-2xl p-8 text-center border-2 border-dashed border-purple-300 shadow-sm">
+            <div className="animate-pulse flex justify-center mb-3">
+                <div className="h-10 w-10 bg-gradient-to-br from-purple-100 to-purple-200 rounded-full"></div>
             </div>
-            <p className="text-gray-400 text-sm font-medium">Scanning for devices nearby...</p>
+            <p className="text-gray-600 text-sm font-semibold">Scanning for devices nearby...</p>
          </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2">
           {peers.map((peer) => (
             <button
               key={peer.id}
               onClick={() => onPair(peer)}
-              className="relative overflow-hidden flex items-center gap-3 p-3 bg-white border border-gray-100 rounded-2xl hover:border-purple-400 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300 group text-left w-full"
+              className="relative overflow-hidden flex items-center gap-4 p-3 bg-white border-2 border-purple-200 rounded-2xl shadow-md hover:shadow-xl hover:border-purple-400 active:scale-98 transition-all duration-200 group text-left w-full"
             >
-              <div className="absolute inset-0 bg-linear-to-r from-purple-50/0 via-purple-50/0 to-purple-50/50 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+              {/* Always visible gradient background */}
+              <div className="absolute inset-0 bg-gradient-to-r from-purple-50/50 via-blue-50/30 to-purple-50/50 opacity-100 group-hover:opacity-100 transition-opacity"></div>
               
-              <div className="relative w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center group-hover:bg-purple-100 group-hover:text-purple-600 transition-colors shadow-inner">
+              {/* Icon container - always colored */}
+              <div className="relative w-14 h-14 bg-gradient-to-br from-purple-100 to-blue-100 rounded-2xl flex items-center justify-center text-purple-600 group-hover:from-purple-200 group-hover:to-blue-200 transition-all shadow-sm">
                 {getDeviceIcon(peer.type)}
               </div>
               
+              {/* Device info */}
               <div className="relative flex-1 min-w-0">
-                <div className="font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
+                <div className="font-bold text-gray-900 truncate text-base group-hover:text-purple-700 transition-colors">
                     {peer.name || 'Unknown Device'}
                 </div>
-                <div className="text-xs text-gray-500 truncate font-medium">
-                    {peer.model || (peer.type === 'mobile' ? 'Mobile' : 'Desktop')}
+                <div className="text-xs text-gray-600 truncate font-medium mt-0.5">
+                    {peer.model || (peer.type === 'mobile' ? 'Mobile Device' : 'Desktop')}
                 </div>
               </div>
               
-              <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-gray-50 text-gray-300 group-hover:bg-purple-500 group-hover:text-white transition-all transform translate-x-2 opacity-0 group-hover:opacity-100 group-hover:translate-x-0">
-                 <div className="sr-only">{role === 'sender' ? 'Send' : 'Pair'}</div>
-                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              {/* Arrow - always visible on mobile, animated on hover */}
+              <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-purple-600 text-white shadow-md group-hover:bg-purple-700 group-hover:shadow-lg transition-all">
+                 <div className="sr-only">{role === 'sender' ? 'Send to this device' : 'Pair with this device'}</div>
+                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M5 12h14M12 5l7 7-7 7"/>
                  </svg>
               </div>
