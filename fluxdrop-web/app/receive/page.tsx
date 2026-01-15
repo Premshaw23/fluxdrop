@@ -344,15 +344,28 @@ export default function ReceivePage() {
         transfer.onMetadata = (meta: FileMetadata) => {
           setMetadataList((prev) => {
             const updated = [...prev];
-            let idx = batchMetadata.findIndex(
-              (m) =>
-                m.name === meta.name &&
-                m.size === meta.size &&
-                m.type === meta.type
-            );
+            // Use fileIndex from metadata if available, otherwise find empty slot or use current ref
+            let idx = meta.fileIndex !== undefined ? meta.fileIndex : -1;
+
+            if (idx === -1) {
+              idx = batchMetadata.findIndex(
+                (m) =>
+                  m.name === meta.name &&
+                  m.size === meta.size &&
+                  m.type === meta.type
+              );
+            }
+
             if (idx === -1) idx = updated.findIndex((m) => m === null);
             if (idx === -1) idx = fileIndexRef.current;
-            updated[idx] = meta;
+
+            if (idx >= 0 && idx < updated.length) {
+              updated[idx] = meta;
+            } else if (idx >= updated.length) {
+              // Expand list if needed (shouldn't happen with batch metadata)
+              updated[idx] = meta;
+            }
+
             return updated;
           });
           setStep("receiving");
@@ -839,15 +852,15 @@ export default function ReceivePage() {
           )}
 
           {step === "receiving" && metadataList.length > 0 && (
-            <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-8 border border-gray-100">
-              <div className="text-center mb-6">
-                <div className="w-16 h-16 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-3 animate-pulse">
-                  <Download className="w-8 h-8 text-purple-500" />
+            <div className="bg-white/80 backdrop-blur-xl rounded-2xl sm:rounded-3xl shadow-2xl p-4 sm:p-10 border border-white/50 animate-fade-in">
+              <div className="text-center mb-8">
+                <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3 animate-pulse">
+                  <Download className="w-8 h-8 text-purple-600" />
                 </div>
-                <h2 className="text-2xl sm:text-3xl text-purple-500 font-bold mb-2">
+                <h2 className="text-2xl sm:text-3xl text-purple-900 font-black mb-2 tracking-tight">
                   Receiving Files
                 </h2>
-                <p className="text-sm text-gray-600">
+                <p className="text-sm text-purple-600 font-medium">
                   {receivedFiles.filter(Boolean).length} of{" "}
                   {batchMetadata.length || metadataList.length} complete
                 </p>
@@ -864,11 +877,11 @@ export default function ReceivePage() {
                   return (
                     <li
                       key={meta.name + idx}
-                      className={`rounded-lg p-3 sm:p-4 border transition-all ${isComplete
-                        ? "bg-green-50/60 border-green-200"
+                      className={`rounded-2xl p-4 border transition-all shadow-sm ${isComplete
+                        ? "bg-green-50/40 border-green-100"
                         : isActive
-                          ? "bg-purple-50/60 border-purple-200 ring-2 ring-purple-300"
-                          : "bg-gray-50/60 border-gray-200"
+                          ? "bg-purple-50 border-purple-200 ring-2 ring-purple-100"
+                          : "bg-white border-purple-50"
                         }`}
                     >
                       <div className="flex justify-between items-start mb-2">
@@ -899,31 +912,31 @@ export default function ReceivePage() {
 
                       {!isComplete && (
                         <>
-                          <div className="w-full h-2.5 sm:h-3 bg-gray-200 rounded-full overflow-hidden mb-1">
+                          <div className="w-full h-3 bg-purple-100/50 rounded-full overflow-hidden mb-2 shadow-inner">
                             <div
-                              className={`h-full transition-all duration-300 ${isActive ? "bg-purple-500" : "bg-gray-300"
+                              className={`h-full transition-all duration-500 rounded-full ${isActive ? "bg-purple-600 shadow-lg" : "bg-purple-200"
                                 }`}
                               style={{ width: `${progressList[idx] || 0}%` }}
                             />
                           </div>
 
-                          <div className="flex justify-between items-center text-xs text-gray-600 mt-1">
-                            <span className="font-medium">
+                          <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-wider text-purple-400 mt-1">
+                            <span className={isActive ? "text-purple-600" : ""}>
                               {isActive
                                 ? `${Math.round(progressList[idx] || 0)}%`
                                 : isPending
-                                  ? "Waiting..."
+                                  ? "Waiting in queue..."
                                   : "0%"}
                             </span>
 
                             {isActive && (
-                              <div className="flex items-center gap-2 sm:gap-3">
-                                <span className="hidden sm:inline">
+                              <div className="flex items-center gap-3">
+                                <span className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded-md">
                                   {formatSpeed(speedList[idx] || 0)}
                                 </span>
                                 {timeRemainingList[idx] > 0 && (
-                                  <span>
-                                    {formatTime(timeRemainingList[idx])} left
+                                  <span className="text-purple-500">
+                                    {formatTime(timeRemainingList[idx])} remaining
                                   </span>
                                 )}
                               </div>
@@ -953,40 +966,41 @@ export default function ReceivePage() {
               </ul>
 
               {/* Overall Progress */}
-              <div className="mt-6 pt-4 border-t border-gray-200">
-                <div className="flex justify-between text-sm text-gray-600 mb-2">
-                  <span className="font-medium">Overall Progress</span>
-                  <span>
+              <div className="mt-10 pt-6 border-t border-purple-100">
+                <div className="flex justify-between text-xs font-bold uppercase tracking-widest text-purple-900 mb-3">
+                  <span>Overall Session Progress</span>
+                  <span className="bg-purple-600 text-white px-3 py-1 rounded-full text-[10px]">
                     {receivedFiles.filter(Boolean).length} /{" "}
-                    {batchMetadata.length || metadataList.length} files
+                    {batchMetadata.length || metadataList.length} Files
                   </span>
                 </div>
-                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div className="w-full h-4 bg-purple-100 rounded-full overflow-hidden shadow-inner p-1">
                   <div
-                    className="h-full bg-linear-to-r from-purple-500 to-blue-500 transition-all duration-500"
+                    className="h-full bg-gradient-to-r from-purple-500 via-indigo-500 to-purple-600 rounded-full shadow-lg transition-all duration-700 relative"
                     style={{
                       width: `${(receivedFiles.filter(Boolean).length /
                         (batchMetadata.length || metadataList.length || 1)) *
                         100
                         }%`,
                     }}
-                  />
+                  >
+                    <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+                  </div>
                 </div>
               </div>
 
               {/* Download completed files button */}
               {receivedFiles.filter(Boolean).length > 0 && (
-                <div className="mt-4">
+                <div className="mt-8">
                   <button
                     onClick={handleDownloadCompleted}
-                    className="w-full bg-purple-500 text-white py-3 rounded-lg hover:bg-purple-600 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 flex items-center justify-center gap-2"
+                    className="w-full bg-purple-600 text-white py-4 rounded-2xl hover:bg-purple-700 font-bold transition-all shadow-xl shadow-purple-200 flex items-center justify-center gap-2 active:scale-[0.98] transform"
                   >
                     <Download className="w-5 h-5" />
-                    Download {receivedFiles.filter(Boolean).length} Completed File
-                    {receivedFiles.filter(Boolean).length !== 1 ? "s" : ""}
+                    Download {receivedFiles.filter(Boolean).length} Completed {receivedFiles.filter(Boolean).length !== 1 ? "Files" : "File"}
                   </button>
-                  <p className="text-xs text-center text-gray-500 mt-2">
-                    You can download completed files while others are still transferring
+                  <p className="text-[10px] text-center text-purple-400 mt-3 font-bold uppercase tracking-widest">
+                    Live download available during transfer
                   </p>
                 </div>
               )}
