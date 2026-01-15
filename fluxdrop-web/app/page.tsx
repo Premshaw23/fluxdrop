@@ -10,14 +10,31 @@ export default function HomePage() {
     <div className="min-h-screen bg-linear-to-br from-blue-100 via-white to-purple-100">
       {/* Header */}
       <header className="border-b bg-white/50 backdrop-blur-sm" role="banner">
-        <div className="container mx-auto px-4 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Image src={"/logo.png"} width={200} height={200} className="w-10 h-10 text-blue-600 rounded-2xl" alt='FluxDrop logo'/>
-            <h1 className="text-2xl font-bold text-gray-900">FluxDrop</h1>
-          </div>
-          <UserIdentityDisplay />
-        </div>
-      </header>
+  <div className="container mx-auto px-4 py-2 flex items-center justify-between gap-2">
+
+
+    {/* Left */}
+    <div className="flex items-center gap-2 min-w-0">
+      <Image
+        src="/logo.png"
+        width={200}
+        height={200}
+        className="md:w-10 md:h-10 w-8 h-8 text-blue-600 rounded-2xl flex-shrink-0"
+        alt="FluxDrop logo"
+      />
+      <h1 className="text-xl md:text-2xl font-bold text-gray-900 truncate">
+        FluxDrop
+      </h1>
+    </div>
+
+    {/* Right */}
+    <div className="min-w-0 max-w-[50%] overflow-hidden">
+      <UserIdentityDisplay />
+    </div>
+
+  </div>
+</header>
+
 
       {/* Main Content */}
       <main className="container mx-auto px-4 py-16" id="main-content" tabIndex={-1} role="main">
