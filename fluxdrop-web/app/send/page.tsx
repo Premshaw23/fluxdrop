@@ -992,7 +992,7 @@ export default function SendPage() {
                     onChange={handleFileSelect}
                     className="hidden"
                   />
-                  <div className="w-full bg-gray-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-all font-bold shadow-lg shadow-gray-200 group-hover:scale-[1.02] flex items-center justify-center gap-2">
+                  <div className="w-full bg-purple-600 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-all font-bold shadow-lg shadow-gray-200 group-hover:scale-[1.02] flex items-center justify-center gap-2">
                     <Upload className="w-5 h-5" />
                     {files.length > 0 ? "Add Files" : "Select Files"}
                   </div>
@@ -1300,7 +1300,7 @@ export default function SendPage() {
               </p>
               <button
                 onClick={reset}
-                className="w-full bg-gray-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-colors font-bold shadow-lg"
+                className="w-full bg-purple-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-colors font-bold shadow-lg"
               >
                 Send More Files
               </button>
