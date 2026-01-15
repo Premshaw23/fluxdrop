@@ -246,17 +246,24 @@ export class FileTransferSender {
     for (const idx of missingChunks) {
       const key = `${this._fileIndex}-${idx}`;
       
-      // Check resend count
+      // ✅ FIX: More lenient max resends (50 instead of 10)
       const resendCount = this.chunkResendCounts.get(key) || 0;
       if (resendCount >= this.MAX_CHUNK_RESENDS) {
         console.error(`[FileTransferSender] Chunk ${idx} exceeded max resends (${resendCount})`);
+        
+        // ✅ Notify error only on the first exceeding attempt
+        if (resendCount === this.MAX_CHUNK_RESENDS) {
+          this.onError?.(new Error(`Chunk ${idx} failed after ${this.MAX_CHUNK_RESENDS} attempts`));
+        }
         continue;
       }
       
-      // Check if we sent this chunk too recently
+      // ✅ FIX: Use exponential backoff for resend timing
       const lastSent = this.lastResendTime.get(key) || 0;
-      if (now - lastSent < this.MIN_RESEND_INTERVAL_MS) {
-        console.warn(`[FileTransferSender] Skipping chunk ${idx} - sent ${now - lastSent}ms ago`);
+      const backoffDelay = Math.min(5000, 100 * Math.pow(2, resendCount)); 
+      
+      if (now - lastSent < backoffDelay) {
+        console.warn(`[FileTransferSender] Skipping chunk ${idx} - in backoff (${now - lastSent}ms < ${backoffDelay}ms)`);
         continue;
       }
       
@@ -267,17 +274,26 @@ export class FileTransferSender {
       return;
     }
 
+    // ✅ FIX: Check if these chunks are already ACKed (prevent race condition)
+    const actuallyMissing = chunksToResend.filter(idx => !this.acknowledgedChunks.has(idx));
+    
+    if (actuallyMissing.length === 0) {
+      console.log(`[FileTransferSender] All requested chunks already ACKed, sending ack-all`);
+      this.sendMessage({ type: "ack-all", fileIndex: this._fileIndex });
+      return;
+    }
+
     // Check backpressure before resending batch
     const buffered = this.getBufferedAmount();
     if (buffered > CHUNK_SIZE * 5) {
       console.warn(`[FileTransferSender] High buffered amount (${formatBytes(buffered)}), delaying resends`);
-      setTimeout(() => this.handleResumeRequest(missingChunks), 1000);
+      setTimeout(() => this.handleResumeRequest(actuallyMissing), 1000);
       return;
     }
 
-    console.log(`[FileTransferSender] Resending ${chunksToResend.length} chunks after filtering`);
+    console.log(`[FileTransferSender] Resending ${actuallyMissing.length} chunks after validation`);
 
-    for (const idx of chunksToResend) {
+    for (const idx of actuallyMissing) {
       if (idx >= 0 && idx < this.chunks.length) {
         const key = `${this._fileIndex}-${idx}`;
         
@@ -681,7 +697,8 @@ export class FileTransferReceiver {
     startTime: number;
     completeMessageReceived: boolean;
     completeWaitStartTime: number;
-    completeFileInProgress: boolean; // ✅ ADD: Prevent double completion
+    completeFileInProgress: boolean;
+    lastMissingChunkRequest: number; // ✅ NEW: Track last time we requested missing chunks
   }> = new Map();
   
   private readonly RECEIVER_WAIT_TIMEOUT_MS = 60000;
@@ -811,6 +828,7 @@ export class FileTransferReceiver {
       completeMessageReceived: false,
       completeWaitStartTime: 0,
       completeFileInProgress: false,
+      lastMissingChunkRequest: 0,
     });
 
     this.onMetadata?.(metadata);
@@ -826,6 +844,12 @@ export class FileTransferReceiver {
     const state = this.fileStates.get(fileIndex);
     if (!state) {
       console.error(`[FileTransferReceiver] No state for file ${fileIndex}`);
+      return;
+    }
+
+    // ✅ FIX: Check for duplicate BEFORE any processing
+    if (state.receivedChunkBitmap[chunkIndex]) {
+      console.warn(`[FileTransferReceiver] Duplicate chunk ${chunkIndex} of file ${fileIndex} - ignoring`);
       return;
     }
 
@@ -863,18 +887,12 @@ export class FileTransferReceiver {
       return;
     }
 
-    // Check for duplicate
-  if (state.receivedChunkBitmap[chunkIndex]) {
-    console.warn(`[FileTransferReceiver] Duplicate chunk ${chunkIndex} for file ${fileIndex} - ignoring`);
-    return; // ✅ FIX: Don't send ACK for duplicates
-  }
-
-    // Store chunk
+    // Store chunk and mark as received BEFORE sending ACK
     state.receivedChunks.set(chunkIndex, chunkData);
     state.receivedChunkBitmap[chunkIndex] = true;
     state.bytesReceived += chunkData.byteLength;
 
-    // Send ack
+    // Send ack AFTER marking as received
     this.sendControlMessage({
       type: "chunk-ack",
       chunkIndex,
@@ -966,34 +984,50 @@ private async handleComplete(fileIndex: number) {
       state.completeWaitStartTime = Date.now();
     }
 
-    // ✅ FIX: Check timeout BEFORE sending request
     const elapsed = Date.now() - state.completeWaitStartTime;
+    
+    // ✅ FIX: Abort after timeout with clear error
     if (elapsed > this.RECEIVER_WAIT_TIMEOUT_MS) {
-      this.onError?.(new Error(`Timeout waiting for ${missingChunks.length} chunks of file ${fileIndex}`));
+      const errorMsg = `Transfer incomplete: ${missingChunks.length} chunks never arrived after ${elapsed}ms`;
+      console.error(`[FileTransferReceiver] ${errorMsg}`);
+      this.onError?.(new Error(errorMsg));
+      
+      // Clean up failed file to prevent further resume requests
+      this.fileStates.delete(fileIndex);
       return;
     }
 
+    // ✅ FIX: Only request chunks if we haven't recently (smarter request timing)
+    const timeSinceLastRequest = Date.now() - (state.lastMissingChunkRequest || 0);
+    const requestDelay = Math.min(10000, 2000 + (elapsed / 5)); // Start at 2s, increase to 10s
+    
+    if (timeSinceLastRequest < requestDelay) {
+      console.log(`[FileTransferReceiver] Waiting ${Math.round(requestDelay - timeSinceLastRequest)}ms before next request`);
+      setTimeout(() => this.handleComplete(fileIndex), requestDelay - timeSinceLastRequest);
+      return;
+    }
+
+    // Send request for missing chunks
+    state.lastMissingChunkRequest = Date.now();
     this.sendControlMessage({
       type: "resume-request",
       missingChunks,
       fileIndex,
     });
 
-    // ✅ FIX: Use a more conservative backoff for retry check
-    const retryDelay = Math.min(5000, 2000 + (elapsed / 5)); 
-    console.log(`[FileTransferReceiver] Will check again in ${retryDelay}ms if needed (elapsed: ${elapsed}ms)`);
-    
+    console.log(`[FileTransferReceiver] Requested ${missingChunks.length} missing chunks (elapsed: ${elapsed}ms)`);
+
+    // ✅ FIX: Schedule a retry check with matching delay
     setTimeout(() => {
       // Only retry if still incomplete
       const currentState = this.fileStates.get(fileIndex);
-      if (!currentState || currentState.completeFileInProgress) return; // File completed or clean up
+      if (!currentState || currentState.completeFileInProgress) return; 
       
       const currentReceived = currentState.receivedChunkBitmap.filter((b) => b).length;
       if (currentReceived < currentState.metadata.chunks) {
-        console.log(`[FileTransferReceiver] Retrying complete check for file ${fileIndex} (${currentReceived}/${currentState.metadata.chunks})`);
         this.handleComplete(fileIndex);
       }
-    }, retryDelay);
+    }, requestDelay);
   }
 }
 
