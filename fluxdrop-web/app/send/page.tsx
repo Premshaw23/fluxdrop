@@ -12,6 +12,7 @@ const QRCode = dynamic(
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Upload, Copy, Check, Wifi } from "lucide-react";
 import Link from "next/link";
+import NearbyDevices from "@/components/NearbyDevices";
 import { SignalingClient } from "@/lib/signaling/SignalingClient";
 import { RTCConnection } from "@/lib/webrtc/RTCConnection";
 import {
@@ -100,6 +101,40 @@ export default function SendPage() {
   // CRITICAL FIX: Prevent duplicate operations
   const isResettingRef = useRef(false);
   const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Discovery & Invite State
+  const [discoveryClient, setDiscoveryClient] = useState<SignalingClient | null>(
+    null
+  );
+  const pendingInviteRef = useRef<any>(null);
+
+  // Initialize discovery
+  useEffect(() => {
+    const signalingUrl =
+      process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:3001";
+    const client = new SignalingClient(signalingUrl);
+
+    client
+      .connect()
+      .then(() => {
+        if (isMountedRef.current) {
+          setDiscoveryClient(client);
+          // Reuse this connection for transfer if possible
+          if (!signalingRef.current) {
+            signalingRef.current = client;
+          }
+        }
+      })
+      .catch((err) => console.error("Discovery connect failed:", err));
+
+    return () => {
+      // Don't disconnect explicitly here to allow handover to main signalingRef
+      // The main cleanup ref handles signalingRef disconnection
+      if (client !== signalingRef.current) {
+          client.disconnect();
+      }
+    };
+  }, []);
 
   // Initialize mounted state and offline detection
   useEffect(() => {
@@ -523,14 +558,38 @@ export default function SendPage() {
     initializeConnection();
   };
 
+  const handlePairDevice = useCallback(
+    (device: any) => {
+      if (files.length === 0 && filesRef.current.length === 0) {
+        setError("Please select files first.");
+        return;
+      }
+
+      // Store target for when session is ready
+      pendingInviteRef.current = device;
+
+      // Start normal send flow
+      handleSend();
+    },
+    [files]
+  );
+
   const initializeConnection = async () => {
     try {
       const signalingUrl =
         process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:3001";
-      const signaling = new SignalingClient(signalingUrl);
-      signalingRef.current = signaling;
+      
+      // Reuse existing client if available
+      let signaling = signalingRef.current;
+      
+      if (!signaling) {
+        signaling = new SignalingClient(signalingUrl);
+        signalingRef.current = signaling;
+      }
 
-      await signaling.connect();
+      if (!signaling.isConnected()) {
+        await signaling.connect();
+      }
 
       const rtc = new RTCConnection({
         onStateChange: (state) => {
@@ -587,6 +646,17 @@ export default function SendPage() {
       signaling.on("session-created", (message) => {
         if (isMountedRef.current) {
           setSessionCode(message.code);
+          
+          // Handle pending invite
+          if (pendingInviteRef.current) {
+             console.log("Sending invite to:", pendingInviteRef.current.name);
+             signaling.inviteDevice(
+               pendingInviteRef.current.id, 
+               message.code, 
+               "Sender" // We could use a real name if we had one
+             );
+             pendingInviteRef.current = null;
+          }
         }
       });
 
@@ -1032,6 +1102,14 @@ export default function SendPage() {
                   </div>
                 </>
               )}
+
+              {/* Nearby Devices Scanner */}
+               <NearbyDevices 
+                 signaling={discoveryClient}
+                 deviceName="Sender"
+                 role="sender"
+                 onPair={handlePairDevice}
+               />
             </div>
           )}
 
@@ -1150,7 +1228,8 @@ export default function SendPage() {
                           </>
                         )}
                       </button>
-                      <button
+                      
+                       <button
                         onClick={() => {
                           const url = `${
                             typeof window !== "undefined"
@@ -1169,31 +1248,23 @@ export default function SendPage() {
                         }}
                         className="flex-1 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-base sm:text-lg touch-manipulation min-h-12"
                       >
-                        <svg
-                          className="w-5 h-5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
-                          />
-                        </svg>
-                        Share Link
+                         Share Link
                       </button>
                     </div>
+
                   </>
                 )}
               </div>
+
+
 
               <p className="text-center text-sm text-gray-500">
                 Code expires in 5 minutes
               </p>
             </div>
           )}
+
+
 
           {/* CONNECTED STEP */}
           {step === "connected" && (

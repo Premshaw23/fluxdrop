@@ -70,6 +70,61 @@ export declare const SignalingMessageSchema: z.ZodDiscriminatedUnion<"type", [z.
 }, {
     type: "public-key";
     publicKey: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"discovery:announce">;
+    device: z.ZodObject<{
+        id: z.ZodOptional<z.ZodString>;
+        name: z.ZodString;
+        type: z.ZodString;
+        model: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    }, {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    }>;
+}, "strip", z.ZodTypeAny, {
+    type: "discovery:announce";
+    device: {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    };
+}, {
+    type: "discovery:announce";
+    device: {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    };
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"discovery:list">;
+}, "strip", z.ZodTypeAny, {
+    type: "discovery:list";
+}, {
+    type: "discovery:list";
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"discovery:invite">;
+    targetId: z.ZodString;
+    code: z.ZodString;
+    senderName: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
+    type: "discovery:invite";
+    code: string;
+    targetId: string;
+    senderName?: string | undefined;
+}, {
+    type: "discovery:invite";
+    code: string;
+    targetId: string;
+    senderName?: string | undefined;
 }>]>;
 export type SignalingMessage = z.infer<typeof SignalingMessageSchema>;
 export declare function validateMessage(message: unknown): z.SafeParseReturnType<{
@@ -93,6 +148,21 @@ export declare function validateMessage(message: unknown): z.SafeParseReturnType
 } | {
     type: "public-key";
     publicKey: string;
+} | {
+    type: "discovery:announce";
+    device: {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    };
+} | {
+    type: "discovery:list";
+} | {
+    type: "discovery:invite";
+    code: string;
+    targetId: string;
+    senderName?: string | undefined;
 }, {
     type: "create-session";
 } | {
@@ -114,6 +184,21 @@ export declare function validateMessage(message: unknown): z.SafeParseReturnType
 } | {
     type: "public-key";
     publicKey: string;
+} | {
+    type: "discovery:announce";
+    device: {
+        type: string;
+        name: string;
+        id?: string | undefined;
+        model?: string | undefined;
+    };
+} | {
+    type: "discovery:list";
+} | {
+    type: "discovery:invite";
+    code: string;
+    targetId: string;
+    senderName?: string | undefined;
 }>;
 export type ServerMessage = {
     type: 'session-created';

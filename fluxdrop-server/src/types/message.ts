@@ -37,13 +37,37 @@ const PublicKeySchema = z.object({
 });
 
 
-export const SignalingMessageSchema = z.discriminatedUnion('type', [
+const DiscoveryAnnounceSchema = z.object({
+  type: z.literal("discovery:announce"),
+  device: z.object({
+    id: z.string().optional(),
+    name: z.string(),
+    type: z.string(),
+    model: z.string().optional(),
+  }),
+});
+
+const DiscoveryListSchema = z.object({
+  type: z.literal("discovery:list"),
+});
+
+const DiscoveryInviteSchema = z.object({
+  type: z.literal("discovery:invite"),
+  targetId: z.string(),
+  code: z.string(),
+  senderName: z.string().optional(),
+});
+
+export const SignalingMessageSchema = z.discriminatedUnion("type", [
   CreateSessionSchema,
   JoinSessionSchema,
   OfferSchema,
   AnswerSchema,
   IceCandidateSchema,
-  PublicKeySchema
+  PublicKeySchema,
+  DiscoveryAnnounceSchema,
+  DiscoveryListSchema,
+  DiscoveryInviteSchema,
 ]);
 
 export type SignalingMessage = z.infer<typeof SignalingMessageSchema>;

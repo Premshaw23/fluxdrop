@@ -139,6 +139,28 @@ export class SignalingClient {
     this.send({ type: 'public-key', publicKey });
   }
 
+  // 🔍 Discovery Methods
+
+  announceDevice(device: any) {
+    this.send({
+      type: 'discovery:announce',
+      device
+    });
+  }
+
+  discoverDevices() {
+    this.send({ type: 'discovery:list' });
+  }
+
+  inviteDevice(targetId: string, code: string, senderName: string) {
+    this.send({
+      type: 'discovery:invite',
+      targetId,
+      code,
+      senderName
+    });
+  }
+
   disconnect() {
     if (this.ws) {
       this.ws.close();

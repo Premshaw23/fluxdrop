@@ -29,6 +29,7 @@ import {
   importPublicKey,
   deriveSharedSecret,
 } from "@/lib/crypto/crypto";
+import { useDiscovery } from "@/hooks/useDiscovery";
 
 type Step = "enter-code" | "connecting" | "receiving" | "complete";
 
@@ -81,16 +82,52 @@ export default function ReceivePage() {
   // Track if component is mounted
   const isMountedRef = useRef(true);
 
-  // Initialize mounted state
+  // Discovery State
+  const [signalingClient, setSignalingClient] = useState<SignalingClient | null>(null);
+  const { peers } = useDiscovery({
+     signaling: signalingClient,
+     deviceName: "Receiver", // We could randomize this or let user pick
+     deviceType: "receiver"
+  });
+
+  // Initialize mounted state & Auto-connect for discovery
   useEffect(() => {
     isMountedRef.current = true;
     if (typeof window !== "undefined" && typeof navigator !== "undefined") {
       setIsOffline(!navigator.onLine);
     }
+
+    // Auto-connect to signaling for discovery
+    const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:3001";
+    const client = new SignalingClient(signalingUrl);
+    
+    client.connect().then(() => {
+        if(isMountedRef.current) {
+            setSignalingClient(client);
+            signalingRef.current = client; // Keep ref for existing logic
+        }
+    }).catch(err => console.error("Auto-connect failed:", err));
+
+    // Listen for Invites
+    client.on('discovery:invite', (message: any) => {
+        if(isMountedRef.current && stepRef.current === 'enter-code') {
+             // Use a native confirm or custom UI. For MVp, native confirm.
+             // "User X wants to send you files. Accept?"
+             // Actually, lets just Auto-Join if it matches our expectation or show a toast?
+             // Better: Auto-fill code and join.
+             console.log(`📨 Received invite from ${message.senderName} with code ${message.code}`);
+             setCode(message.code);
+             handleJoinSession(message.code);
+        }
+    });
+
     return () => {
       isMountedRef.current = false;
+      // Don't disconnect here if we are transitioning to transfer? 
+      // Actually existing logic handles disconnects.
+      // We should probably leave it open.
     };
-  }, []);
+  }, []); // Run once
 
   // Online/offline listeners
   useEffect(() => {
