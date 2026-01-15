@@ -78,6 +78,7 @@ export default function ReceivePage() {
   const rtcRef = useRef<RTCConnection | null>(null);
   const transferRef = useRef<FileTransferReceiver | null>(null);
   const fileIndexRef = useRef(0);
+  const batchMetadataRef = useRef<FileMetadata[]>([]);
 
   // CRITICAL FIX: Track if transfer completed successfully
   const transferCompleteRef = useRef(false);
@@ -247,6 +248,7 @@ export default function ReceivePage() {
     setError("");
     setHandshakeInProgress(true);
     setBatchMetadata([]);
+    batchMetadataRef.current = [];
     setMetadataList([]);
     setProgressList([]);
     setSpeedList([]);
@@ -332,6 +334,7 @@ export default function ReceivePage() {
           if (!files) return;
 
           setBatchMetadata(files);
+          batchMetadataRef.current = files; // ✅ Sync ref
           setMetadataList(files.map(() => null));
           setProgressList(new Array(files.length).fill(0));
           setSpeedList(new Array(files.length).fill(0));
@@ -348,7 +351,7 @@ export default function ReceivePage() {
             let idx = meta.fileIndex !== undefined ? meta.fileIndex : -1;
 
             if (idx === -1) {
-              idx = batchMetadata.findIndex(
+              idx = batchMetadataRef.current.findIndex(
                 (m) =>
                   m.name === meta.name &&
                   m.size === meta.size &&
@@ -417,6 +420,9 @@ export default function ReceivePage() {
             `[ReceivePage] File ${completedFileIndex} complete, size: ${file.size}`
           );
 
+          // ✅ FIX: Update fileIndexRef IMMEDIATELY
+          fileIndexRef.current = completedFileIndex + 1;
+
           // Calculate hash for debugging
           const arrayBuffer = await file.arrayBuffer();
           const hashBuffer = await window.crypto.subtle.digest(
@@ -441,28 +447,24 @@ export default function ReceivePage() {
             return updated;
           });
 
-          // Ensure metadata is set
+          // Ensure metadata is set (especially if onMetadata was missed)
           setMetadataList((prev) => {
             const updated = [...prev];
             if (
               !updated[completedFileIndex] &&
-              batchMetadata[completedFileIndex]
+              batchMetadataRef.current[completedFileIndex]
             ) {
-              updated[completedFileIndex] = batchMetadata[completedFileIndex];
+              updated[completedFileIndex] = batchMetadataRef.current[completedFileIndex];
             }
             return updated;
           });
-
-          // ✅ FIX: Update fileIndexRef BEFORE setting received files
-          // This ensures the next file's progress goes to the right index
-          fileIndexRef.current = completedFileIndex + 1;
 
           // Add file to received files and check completion
           setReceivedFiles((prev) => {
             const updated = [...prev];
             updated[completedFileIndex] = file;
 
-            const totalFiles = batchMetadata.length || 1;
+            const totalFiles = batchMetadataRef.current.length || 1;
             const receivedCount = updated.filter(Boolean).length;
 
             console.log(

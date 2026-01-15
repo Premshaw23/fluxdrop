@@ -239,9 +239,9 @@ export class FileTransferSender {
       }]`
     );
 
-     // ✅ FIX: Filter out chunks that were recently sent or exceeded retry limit
     const now = Date.now();
     const chunksToResend: number[] = [];
+    const failedChunks: number[] = []; // ✅ NEW: Track permanently failed chunks
     
     for (const idx of missingChunks) {
       const key = `${this._fileIndex}-${idx}`;
@@ -250,11 +250,7 @@ export class FileTransferSender {
       const resendCount = this.chunkResendCounts.get(key) || 0;
       if (resendCount >= this.MAX_CHUNK_RESENDS) {
         console.error(`[FileTransferSender] Chunk ${idx} exceeded max resends (${resendCount})`);
-        
-        // ✅ Notify error only on the first exceeding attempt
-        if (resendCount === this.MAX_CHUNK_RESENDS) {
-          this.onError?.(new Error(`Chunk ${idx} failed after ${this.MAX_CHUNK_RESENDS} attempts`));
-        }
+        failedChunks.push(idx); // ✅ Track failure
         continue;
       }
       
@@ -268,6 +264,15 @@ export class FileTransferSender {
       }
       
       chunksToResend.push(idx);
+    }
+    
+    // ✅ FIX: Abort if any chunks permanently failed
+    if (failedChunks.length > 0) {
+      this.onError?.(new Error(
+        `Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} attempts`
+      ));
+      this.cancel();
+      return;
     }
     
     if (chunksToResend.length === 0) {
@@ -847,7 +852,7 @@ export class FileTransferReceiver {
       return;
     }
 
-    // ✅ FIX: Check for duplicate BEFORE any processing
+    // ✅ FIX: Check for duplicate FIRST (before decryption)
     if (state.receivedChunkBitmap[chunkIndex]) {
       console.warn(`[FileTransferReceiver] Duplicate chunk ${chunkIndex} of file ${fileIndex} - ignoring`);
       return;
@@ -863,7 +868,7 @@ export class FileTransferReceiver {
           new Uint8Array(iv)
         );
       } catch (e) {
-        console.error(`[FileTransferReceiver] Decryption failed for chunk ${chunkIndex} of file ${fileIndex}`, e);
+        console.error(`[FileTransferReceiver] Decryption failed for chunk ${chunkIndex}`, e);
         this.onError?.(new Error(`Decryption failed for chunk ${chunkIndex}`));
         return;
       }
@@ -871,19 +876,27 @@ export class FileTransferReceiver {
       chunkData = data;
     }
 
-    // Verify hash
+    // ✅ FIX: Verify hash BEFORE marking as received
     if (hash) {
       const hashBuffer = await sha256(chunkData);
       const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
       if (hashB64 !== hash) {
         this.logError(`Chunk ${chunkIndex} of file ${fileIndex} integrity check failed`);
+        // Don't mark as received, don't send ACK, request resend
+        setTimeout(() => {
+          this.sendControlMessage({
+            type: "resume-request",
+            missingChunks: [chunkIndex],
+            fileIndex,
+          });
+        }, 1000);
         return;
       }
     }
 
     // Validate index
     if (chunkIndex < 0 || chunkIndex >= state.metadata.chunks) {
-      console.error(`[FileTransferReceiver] Invalid chunk index ${chunkIndex} for file ${fileIndex}`);
+      console.error(`[FileTransferReceiver] Invalid chunk index ${chunkIndex}`);
       return;
     }
 
@@ -892,7 +905,7 @@ export class FileTransferReceiver {
     state.receivedChunkBitmap[chunkIndex] = true;
     state.bytesReceived += chunkData.byteLength;
 
-    // Send ack AFTER marking as received
+    // Send ack AFTER verification
     this.sendControlMessage({
       type: "chunk-ack",
       chunkIndex,
@@ -1025,7 +1038,8 @@ private async handleComplete(fileIndex: number) {
       
       const currentReceived = currentState.receivedChunkBitmap.filter((b) => b).length;
       if (currentReceived < currentState.metadata.chunks) {
-        this.handleComplete(fileIndex);
+        console.log(`[FileTransferReceiver] Retry check: still missing ${currentState.metadata.chunks - currentReceived} chunks`);
+        this.handleComplete(fileIndex); // ✅ Recursive retry until timeout or complete
       }
     }, requestDelay);
   }
