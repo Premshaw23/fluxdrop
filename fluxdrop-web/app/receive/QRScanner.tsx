@@ -43,11 +43,11 @@ export default function QRScannerModal({ onResult, onClose }: QRScannerModalProp
   }, [onResult, onClose]);
 
   return (
-    <div 
+    <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
       onClick={onClose}
     >
-      <div 
+      <div
         className="relative bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -57,7 +57,7 @@ export default function QRScannerModal({ onResult, onClose }: QRScannerModalProp
           className="absolute top-4 right-4 z-10 p-2 bg-white/90 hover:bg-white rounded-full transition-colors shadow-lg"
           aria-label="Close scanner"
         >
-          <X className="w-5 h-5 text-gray-700" />
+          <X className="w-5 h-5 text-purple-900" />
         </button>
 
         {/* Scanner Area */}
@@ -65,16 +65,16 @@ export default function QRScannerModal({ onResult, onClose }: QRScannerModalProp
           <h2 className="text-2xl font-bold text-purple-600 mb-2 text-center">
             Scan QR Code
           </h2>
-          <p className="text-gray-600 text-sm mb-6 text-center">
+          <p className="text-purple-700 text-sm mb-6 text-center">
             Position the QR code in the frame
           </p>
 
           <div className="relative aspect-square bg-gray-900 rounded-xl overflow-hidden">
-            <video 
-              ref={videoRef} 
+            <video
+              ref={videoRef}
               className="w-full h-full object-cover"
             />
-            
+
             {/* Simple Corner Overlay */}
             <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
               <div className="relative w-3/4 h-3/4">
@@ -87,7 +87,7 @@ export default function QRScannerModal({ onResult, onClose }: QRScannerModalProp
             </div>
           </div>
 
-          <p className="text-center text-xs text-gray-500 mt-4">
+          <p className="text-center text-xs text-purple-600 mt-4">
             Camera will scan automatically
           </p>
         </div>

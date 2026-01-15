@@ -12,8 +12,9 @@ const QRScanner = dynamic(() => import("./QRScanner"), {
 });
 
 import JSZip from "jszip";
-import { ArrowLeft, Download, Check } from "lucide-react";
+import { ArrowLeft, Download, Check, Wifi, Monitor } from "lucide-react";
 import Link from "next/link";
+import NearbyDevices from "@/components/NearbyDevices";
 import { SignalingClient } from "@/lib/signaling/SignalingClient";
 import UserIdentityDisplay from "@/components/UserIdentityDisplay";
 import { useUserStore } from "@/lib/store";
@@ -88,16 +89,16 @@ export default function ReceivePage() {
   // Discovery State
   const [signalingClient, setSignalingClient] = useState<SignalingClient | null>(null);
   const { name, ensureName } = useUserStore();
-  
+
   // Ensure we have a name
   useEffect(() => {
     ensureName();
   }, [ensureName]);
 
   const { peers } = useDiscovery({
-     signaling: signalingClient,
-     deviceName: name || "FluxDrop Receiver",
-     deviceType: "receiver"
+    signaling: signalingClient,
+    deviceName: name || "FluxDrop Receiver",
+    deviceType: "receiver"
   });
 
   // Initialize mounted state & Auto-connect for discovery
@@ -110,25 +111,25 @@ export default function ReceivePage() {
     // Auto-connect to signaling for discovery
     const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:3001";
     const client = new SignalingClient(signalingUrl);
-    
+
     client.connect().then(() => {
-        if(isMountedRef.current) {
-            setSignalingClient(client);
-            signalingRef.current = client; // Keep ref for existing logic
-        }
+      if (isMountedRef.current) {
+        setSignalingClient(client);
+        signalingRef.current = client; // Keep ref for existing logic
+      }
     }).catch(err => console.error("Auto-connect failed:", err));
 
     // Listen for Invites
     client.on('discovery:invite', (message: any) => {
-        if(isMountedRef.current && stepRef.current === 'enter-code') {
-             // Use a native confirm or custom UI. For MVp, native confirm.
-             // "User X wants to send you files. Accept?"
-             // Actually, lets just Auto-Join if it matches our expectation or show a toast?
-             // Better: Auto-fill code and join.
-             console.log(`📨 Received invite from ${message.senderName} with code ${message.code}`);
-             setCode(message.code);
-             handleJoinSession(message.code);
-        }
+      if (isMountedRef.current && stepRef.current === 'enter-code') {
+        // Use a native confirm or custom UI. For MVp, native confirm.
+        // "User X wants to send you files. Accept?"
+        // Actually, lets just Auto-Join if it matches our expectation or show a toast?
+        // Better: Auto-fill code and join.
+        console.log(`📨 Received invite from ${message.senderName} with code ${message.code}`);
+        setCode(message.code);
+        handleJoinSession(message.code);
+      }
     });
 
     return () => {
@@ -225,7 +226,7 @@ export default function ReceivePage() {
       if (isMountedRef.current) {
         setError(
           "Resume failed: " +
-            (err instanceof Error ? err.message : "Unknown error")
+          (err instanceof Error ? err.message : "Unknown error")
         );
         setResumeInProgress(false);
       }
@@ -271,7 +272,7 @@ export default function ReceivePage() {
             setError("Connection failed. Please try again.");
           }
         },
-        onDataChannelOpen: () => {},
+        onDataChannelOpen: () => { },
         onMessage: (data) => {
           transferRef.current?.handleMessage(data);
         },
@@ -475,8 +476,7 @@ export default function ReceivePage() {
             } else {
               // Still receiving files - stay in receiving state
               console.log(
-                `[ReceivePage] Still waiting for ${
-                  totalFiles - receivedCount
+                `[ReceivePage] Still waiting for ${totalFiles - receivedCount
                 } more files`
               );
             }
@@ -614,12 +614,21 @@ export default function ReceivePage() {
     URL.revokeObjectURL(url);
   };
 
-  // Download all as ZIP
-  const handleDownloadAll = async () => {
-    if (!receivedFiles.length) return;
+  // Download completed files as ZIP
+  const handleDownloadCompleted = async () => {
+    const completedFiles = receivedFiles
+      .map((file, idx) => ({ file, idx }))
+      .filter(({ file }) => file !== null);
+
+    if (completedFiles.length === 0) return;
+
+    if (completedFiles.length === 1) {
+      handleDownload(completedFiles[0].idx);
+      return;
+    }
 
     const zip = new JSZip();
-    receivedFiles.forEach((file, idx) => {
+    completedFiles.forEach(({ file, idx }) => {
       const meta = metadataList[idx] || batchMetadata[idx];
       if (file && meta) {
         zip.file(meta.name, file);
@@ -683,17 +692,18 @@ export default function ReceivePage() {
         }
       `}</style>
 
-      <header className="border-b bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-20">
+      <header className="border-b bg-white/60 backdrop-blur-md shadow-sm sticky top-0 z-20">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <Link
             href="/"
-            className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 font-semibold transition-colors"
+            className="inline-flex items-center gap-2 text-purple-900 hover:text-purple-700 font-semibold transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
           {isOffline && (
-            <span className="text-red-600 font-semibold text-sm animate-pulse">
+            <span className="text-red-600 font-semibold text-sm animate-pulse flex items-center gap-1">
+              <Wifi className="w-4 h-4" />
               Offline
             </span>
           )}
@@ -704,31 +714,43 @@ export default function ReceivePage() {
       </header>
 
       {handshakeInProgress && (
-        <div className="flex flex-col items-center justify-center mt-8">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-400 mb-4"></div>
-          <p className="text-purple-700 font-semibold text-lg">
-            Establishing secure connection…
+        <div className="flex flex-col items-center justify-center mt-8 animate-fade-in">
+          <div className="relative w-16 h-16 mb-4">
+            <div className="absolute inset-0 bg-purple-100 rounded-full animate-ping opacity-25"></div>
+            <div className="relative w-16 h-16 bg-purple-50 rounded-full flex items-center justify-center border-2 border-purple-200">
+              <div className="w-8 h-8 border-3 border-purple-200 border-t-purple-600 animate-spin rounded-full"></div>
+            </div>
+          </div>
+          <p className="text-purple-700 font-bold text-lg">
+            Establishing secure connection...
           </p>
+          <p className="text-purple-400 text-sm">Almost there</p>
         </div>
       )}
 
-      <main className="container mx-auto px-4 py-16">
+      <main className="container mx-auto px-4 py-12 sm:py-16">
         <div className="max-w-2xl mx-auto">
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 shadow animate-shake">
-              <div className="font-bold text-lg mb-1">{error}</div>
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 shadow-lg animate-shake flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center shrink-0">
+                <span className="font-bold">!</span>
+              </div>
+              <div className="font-bold text-base flex-1">{error}</div>
             </div>
           )}
 
           {resumeAvailable && (
-            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-100 rounded-lg shadow-sm">
-              <p className="font-semibold mb-2 text-yellow-900">
-                Transfer interrupted
-              </p>
+            <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4 animate-fade-in">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
+                  <Wifi className="w-5 h-5 text-amber-600" />
+                </div>
+                <p className="font-bold text-amber-900">Transfer interrupted</p>
+              </div>
               <button
                 onClick={handleResume}
                 disabled={resumeInProgress}
-                className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600 disabled:bg-yellow-100 disabled:text-yellow-300 transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                className="w-full sm:w-auto bg-amber-500 text-white px-6 py-2.5 rounded-xl hover:bg-amber-600 disabled:bg-amber-100 disabled:text-amber-300 transition-all font-bold shadow-md"
               >
                 {resumeInProgress ? "Resuming..." : "Resume Transfer"}
               </button>
@@ -736,30 +758,30 @@ export default function ReceivePage() {
           )}
 
           {step === "enter-code" && (
-            <div className="bg-white rounded-2xl shadow-2xl p-8 border border-gray-100 animate-fade-in">
+            <div className="bg-white/80 backdrop-blur-xl rounded-2xl sm:rounded-3xl shadow-2xl p-6 sm:p-10 border border-white/50 animate-fade-in">
               <div className="text-center mb-8">
-                <div className="w-20 h-20 bg-linear-to-br from-purple-200 via-purple-50 to-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg animate-pop-in">
-                  <Download className="w-12 h-12 text-purple-500" />
+                <div className="w-20 h-20 bg-linear-to-br from-purple-500 to-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl shadow-purple-200 animate-pop-in">
+                  <Download className="w-10 h-10 text-white" />
                 </div>
-                <div className="sm:hidden mb-4 flex justify-center">
-                    <UserIdentityDisplay />
+                <div className="sm:hidden mb-6 flex justify-center">
+                  <UserIdentityDisplay />
                 </div>
-                <h2 className="text-3xl font-extrabold mb-2 text-purple-500 tracking-tight">
+                <h2 className="text-3xl font-black mb-2 text-purple-900 tracking-tight">
                   Receive Files
                 </h2>
-                <p className="text-gray-600 text-base">
+                <p className="text-purple-600/70 text-base">
                   Enter the 6-digit code or scan QR
                 </p>
               </div>
 
-              <div className="mb-6">
+              <div className="mb-8">
                 <input
                   type="text"
                   maxLength={6}
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
                   placeholder="000000"
-                  className="w-full text-4xl font-bold text-center text-purple-500 tracking-widest p-4 border-2 border-purple-200 rounded-lg focus:border-purple-400 bg-purple-50/70 shadow"
+                  className="w-full text-5xl font-mono font-black text-center text-purple-600 tracking-[0.2em] p-6 border-2 border-purple-100 rounded-2xl focus:border-purple-400 bg-purple-50/30 shadow-inner transition-all outline-none placeholder:text-purple-200"
                   autoFocus
                 />
               </div>
@@ -773,11 +795,34 @@ export default function ReceivePage() {
               <button
                 onClick={() => handleJoinSession()}
                 disabled={code.length !== 6}
-                className="w-full bg-purple-500 text-white py-4 rounded-lg hover:bg-purple-600 disabled:bg-purple-100 disabled:text-purple-300 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 shadow-lg"
+                className="w-full bg-purple-600 text-white py-4 px-6 rounded-2xl hover:bg-purple-700 disabled:bg-purple-100 disabled:text-purple-300 font-bold transition-all shadow-xl shadow-purple-100 mb-8 active:scale-[0.98] transform"
               >
                 <Download className="w-5 h-5 mr-2 inline-block" />
-                Connect
+                Connect & Start Receiving
               </button>
+
+              <div className="relative mb-4">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-purple-100"></div>
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-white px-4 text-purple-400 font-bold tracking-widest">Or wait for invite</span>
+                </div>
+              </div>
+
+              {/* Nearby Devices Scanner */}
+              <NearbyDevices
+                signaling={signalingClient}
+                deviceName={name || "Receiver"}
+                role="receiver"
+                onPair={(device) => {
+                  // If we click on a sender, we should probably do something...
+                  // But in this app, senders invite receivers.
+                  // Maybe we can notify the sender that we are ready?
+                  // For now, it just shows that we are visible.
+                  console.log("Device selected:", device);
+                }}
+              />
             </div>
           )}
 
@@ -803,7 +848,6 @@ export default function ReceivePage() {
                   Receiving Files
                 </h2>
                 <p className="text-sm text-gray-600">
-                  {/* FIX: Use batchMetadata.length as source of truth for total files */}
                   {receivedFiles.filter(Boolean).length} of{" "}
                   {batchMetadata.length || metadataList.length} complete
                 </p>
@@ -820,13 +864,12 @@ export default function ReceivePage() {
                   return (
                     <li
                       key={meta.name + idx}
-                      className={`rounded-lg p-3 sm:p-4 border transition-all ${
-                        isComplete
-                          ? "bg-green-50/60 border-green-200"
-                          : isActive
+                      className={`rounded-lg p-3 sm:p-4 border transition-all ${isComplete
+                        ? "bg-green-50/60 border-green-200"
+                        : isActive
                           ? "bg-purple-50/60 border-purple-200 ring-2 ring-purple-300"
                           : "bg-gray-50/60 border-gray-200"
-                      }`}
+                        }`}
                     >
                       <div className="flex justify-between items-start mb-2">
                         <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -839,13 +882,12 @@ export default function ReceivePage() {
                             </div>
                           )}
                           <span
-                            className={`font-semibold break-all ${
-                              isComplete
-                                ? "text-green-700"
-                                : isActive
+                            className={`font-semibold break-all ${isComplete
+                              ? "text-green-700"
+                              : isActive
                                 ? "text-purple-600"
                                 : "text-gray-500"
-                            }`}
+                              }`}
                           >
                             {meta.name}
                           </span>
@@ -859,9 +901,8 @@ export default function ReceivePage() {
                         <>
                           <div className="w-full h-2.5 sm:h-3 bg-gray-200 rounded-full overflow-hidden mb-1">
                             <div
-                              className={`h-full transition-all duration-300 ${
-                                isActive ? "bg-purple-500" : "bg-gray-300"
-                              }`}
+                              className={`h-full transition-all duration-300 ${isActive ? "bg-purple-500" : "bg-gray-300"
+                                }`}
                               style={{ width: `${progressList[idx] || 0}%` }}
                             />
                           </div>
@@ -871,8 +912,8 @@ export default function ReceivePage() {
                               {isActive
                                 ? `${Math.round(progressList[idx] || 0)}%`
                                 : isPending
-                                ? "Waiting..."
-                                : "0%"}
+                                  ? "Waiting..."
+                                  : "0%"}
                             </span>
 
                             {isActive && (
@@ -892,8 +933,18 @@ export default function ReceivePage() {
                       )}
 
                       {isComplete && (
-                        <div className="text-xs text-green-600 font-medium mt-1">
-                          ✓ Complete
+                        <div className="flex items-center justify-between mt-2">
+                          <div className="text-xs text-green-600 font-medium">
+                            ✓ Complete
+                          </div>
+                          <button
+                            onClick={() => handleDownload(idx)}
+                            className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-xs font-semibold transition-colors flex items-center gap-1"
+                            aria-label={`Download ${meta.name}`}
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Download</span>
+                          </button>
                         </div>
                       )}
                     </li>
@@ -901,7 +952,7 @@ export default function ReceivePage() {
                 })}
               </ul>
 
-              {/* Overall Progress - FIX: Use batchMetadata.length */}
+              {/* Overall Progress */}
               <div className="mt-6 pt-4 border-t border-gray-200">
                 <div className="flex justify-between text-sm text-gray-600 mb-2">
                   <span className="font-medium">Overall Progress</span>
@@ -914,15 +965,31 @@ export default function ReceivePage() {
                   <div
                     className="h-full bg-linear-to-r from-purple-500 to-blue-500 transition-all duration-500"
                     style={{
-                      width: `${
-                        (receivedFiles.filter(Boolean).length /
-                          (batchMetadata.length || metadataList.length || 1)) *
+                      width: `${(receivedFiles.filter(Boolean).length /
+                        (batchMetadata.length || metadataList.length || 1)) *
                         100
-                      }%`,
+                        }%`,
                     }}
                   />
                 </div>
               </div>
+
+              {/* Download completed files button */}
+              {receivedFiles.filter(Boolean).length > 0 && (
+                <div className="mt-4">
+                  <button
+                    onClick={handleDownloadCompleted}
+                    className="w-full bg-purple-500 text-white py-3 rounded-lg hover:bg-purple-600 font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-5 h-5" />
+                    Download {receivedFiles.filter(Boolean).length} Completed File
+                    {receivedFiles.filter(Boolean).length !== 1 ? "s" : ""}
+                  </button>
+                  <p className="text-xs text-center text-gray-500 mt-2">
+                    You can download completed files while others are still transferring
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -963,9 +1030,8 @@ export default function ReceivePage() {
                     return (
                       <li
                         key={idx}
-                        className={`flex justify-between items-center gap-2 p-2 rounded transition-colors ${
-                          isReceived ? "hover:bg-green-100/50" : "bg-yellow-50"
-                        }`}
+                        className={`flex justify-between items-center gap-2 p-2 rounded transition-colors ${isReceived ? "hover:bg-green-100/50" : "bg-yellow-50"
+                          }`}
                       >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
                           {isReceived ? (
@@ -977,9 +1043,8 @@ export default function ReceivePage() {
                           )}
                           <div className="min-w-0 flex-1">
                             <span
-                              className={`font-semibold block truncate ${
-                                isReceived ? "text-gray-900" : "text-yellow-700"
-                              }`}
+                              className={`font-semibold block truncate ${isReceived ? "text-gray-900" : "text-yellow-700"
+                                }`}
                             >
                               {meta.name}
                             </span>
@@ -1015,49 +1080,48 @@ export default function ReceivePage() {
               {/* Overall progress bar if not all files received */}
               {receivedFiles.filter(Boolean).length <
                 (batchMetadata.length || metadataList.length) && (
-                <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                  <div className="flex justify-between text-sm text-yellow-800 mb-2">
-                    <span className="font-medium">Transfer in progress...</span>
-                    <span>
-                      {receivedFiles.filter(Boolean).length} /{" "}
-                      {batchMetadata.length || metadataList.length}
-                    </span>
-                  </div>
-                  <div className="w-full h-2 bg-yellow-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-yellow-500 transition-all duration-500"
-                      style={{
-                        width: `${
-                          (receivedFiles.filter(Boolean).length /
+                  <div className="mb-6 p-4 bg-purple-50 border border-purple-100 rounded-xl">
+                    <div className="flex justify-between text-sm text-purple-800 mb-2">
+                      <span className="font-bold">Transfer in progress...</span>
+                      <span className="font-mono">
+                        {receivedFiles.filter(Boolean).length} /{" "}
+                        {batchMetadata.length || metadataList.length}
+                      </span>
+                    </div>
+                    <div className="w-full h-3 bg-purple-100 rounded-full overflow-hidden shadow-inner">
+                      <div
+                        className="h-full bg-purple-600 transition-all duration-500 rounded-full shadow-lg"
+                        style={{
+                          width: `${(receivedFiles.filter(Boolean).length /
                             (batchMetadata.length || metadataList.length)) *
-                          100
-                        }%`,
-                      }}
-                    />
+                            100
+                            }%`,
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {receivedFiles.filter(Boolean).length > 1 && (
                   <button
-                    onClick={handleDownloadAll}
+                    onClick={handleDownloadCompleted}
                     disabled={
                       receivedFiles.filter(Boolean).length <
                       (batchMetadata.length || metadataList.length)
                     }
-                    className="w-full bg-purple-500 text-white py-3 rounded-lg hover:bg-purple-600 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400 flex items-center justify-center gap-2"
+                    className="w-full bg-purple-600 text-white py-4 rounded-xl hover:bg-purple-700 disabled:bg-purple-100 disabled:text-purple-300 disabled:cursor-not-allowed font-bold transition-all shadow-lg flex items-center justify-center gap-2 active:scale-[0.98] transform"
                   >
                     <Download className="w-5 h-5" />
                     {receivedFiles.filter(Boolean).length <
-                    (batchMetadata.length || metadataList.length)
+                      (batchMetadata.length || metadataList.length)
                       ? "Waiting for all files..."
                       : "Download All as ZIP"}
                   </button>
                 )}
                 <button
                   onClick={reset}
-                  className="w-full bg-white border-2 border-gray-200 py-3 rounded-lg hover:bg-gray-50 font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-200 transition-colors"
+                  className="w-full bg-white border-2 border-purple-100 py-4 rounded-xl hover:bg-purple-50 hover:border-purple-200 font-bold text-purple-700 transition-all active:scale-[0.98] transform"
                 >
                   Receive More Files
                 </button>

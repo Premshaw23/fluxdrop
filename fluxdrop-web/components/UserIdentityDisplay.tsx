@@ -49,7 +49,7 @@ export default function UserIdentityDisplay({ className = "" }: { className?: st
 
   return (
     <div
-      className={`flex items-center justify-center gap-3 bg-white/70 backdrop-blur-md md:px-4 md:py-2.5 py-1 
+      className={`flex items-center justify-center gap-3 bg-white/70 backdrop-blur-md md:px-4 md:py-2.5 px-1 py-1 
   rounded-2xl border border-white/50 shadow-sm hover:shadow-md 
   transition-all duration-300 min-w-0 w-full sm:w-auto ${className}`}
     >

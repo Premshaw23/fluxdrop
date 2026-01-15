@@ -10,7 +10,7 @@ const QRCode = dynamic(
 );
 
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Upload, Copy, Check, Wifi, User, Link as LinkIcon } from "lucide-react";
+import { ArrowLeft, Upload, Copy, Check, Wifi, User, Link as LinkIcon, Smartphone, Link2 } from "lucide-react";
 import Link from "next/link";
 import NearbyDevices from "@/components/NearbyDevices";
 import { SignalingClient } from "@/lib/signaling/SignalingClient";
@@ -30,14 +30,15 @@ import {
   deriveSharedSecret,
 } from "@/lib/crypto/crypto";
 
-type Step = "select" | "waiting" | "connected" | "transferring" | "complete";
+type Step = "select" | "waiting" | "connecting" | "connected" | "transferring" | "complete";
+type PairingMethod = "qr" | "nearby" | null;
 
 export default function SendPage() {
   const router = useRouter();
-  
+
   // User Identity
   const { name, ensureName } = useUserStore();
-  
+
   useEffect(() => {
     ensureName();
   }, [ensureName]);
@@ -56,6 +57,8 @@ export default function SendPage() {
   const [timeRemainingList, setTimeRemainingList] = useState<number[]>([]);
   const [error, setError] = useState("");
   const [errorLog, setErrorLog] = useState<string[]>([]);
+  const [pairingMethod, setPairingMethod] = useState<PairingMethod>(null);
+  const [pairedDeviceName, setPairedDeviceName] = useState<string>("");
 
   // Options
   const [sendAsZip, setSendAsZip] = useState(false);
@@ -110,7 +113,7 @@ export default function SendPage() {
   // CRITICAL FIX: Prevent duplicate operations
   const isResettingRef = useRef(false);
   const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
+
   // Discovery & Invite State
   const [discoveryClient, setDiscoveryClient] = useState<SignalingClient | null>(
     null
@@ -140,7 +143,7 @@ export default function SendPage() {
       // Don't disconnect explicitly here to allow handover to main signalingRef
       // The main cleanup ref handles signalingRef disconnection
       if (client !== signalingRef.current) {
-          client.disconnect();
+        client.disconnect();
       }
     };
   }, []);
@@ -238,8 +241,8 @@ export default function SendPage() {
       ) {
         const unsent = (transferRef.current as any).sentChunkBitmap
           ? (transferRef.current as any).sentChunkBitmap
-              .map((sent: boolean, idx: number) => (sent ? null : idx))
-              .filter((v: number | null) => v !== null)
+            .map((sent: boolean, idx: number) => (sent ? null : idx))
+            .filter((v: number | null) => v !== null)
           : [];
         if (unsent.length > 0) {
           await (transferRef.current as any).handleResumeRequest(unsent);
@@ -254,7 +257,7 @@ export default function SendPage() {
       if (isMountedRef.current) {
         setError(
           "Resume failed: " +
-            (err instanceof Error ? err.message : "Unknown error")
+          (err instanceof Error ? err.message : "Unknown error")
         );
         setResumeInProgress(false);
       }
@@ -553,6 +556,8 @@ export default function SendPage() {
       setStep("select");
       return;
     }
+    setPairingMethod("qr");
+    setPairedDeviceName("");
     setError("");
     setStep("waiting");
     setProgressList(new Array(filesRef.current.length).fill(0));
@@ -574,11 +579,26 @@ export default function SendPage() {
         return;
       }
 
-      // Store target for when session is ready
+      // Store pairing info
+      setPairingMethod("nearby");
+      setPairedDeviceName(device.name || "Unknown Device");
       pendingInviteRef.current = device;
 
-      // Start normal send flow
-      handleSend();
+      // Set to connecting state instead of waiting
+      setStep("connecting");
+      setError("");
+      setProgressList(new Array(filesRef.current.length).fill(0));
+      setSpeedList(new Array(filesRef.current.length).fill(0));
+      setTimeRemainingList(new Array(filesRef.current.length).fill(0));
+      setErrorLog([]);
+      dataChannelReadyRef.current = false;
+      transferStartedRef.current = false;
+      transferCompleteRef.current = false;
+      filesSuccessfullySentRef.current = false;
+      setReadyToSend(false);
+
+      // Initialize connection
+      initializeConnection();
     },
     [files]
   );
@@ -587,10 +607,10 @@ export default function SendPage() {
     try {
       const signalingUrl =
         process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:3001";
-      
+
       // Reuse existing client if available
       let signaling = signalingRef.current;
-      
+
       if (!signaling) {
         signaling = new SignalingClient(signalingUrl);
         signalingRef.current = signaling;
@@ -655,16 +675,16 @@ export default function SendPage() {
       signaling.on("session-created", (message) => {
         if (isMountedRef.current) {
           setSessionCode(message.code);
-          
+
           // Handle pending invite
           if (pendingInviteRef.current) {
-             console.log("Sending invite to:", pendingInviteRef.current.name);
-             signaling.inviteDevice(
-               pendingInviteRef.current.id, 
-               message.code, 
-               "Sender" // We could use a real name if we had one
-             );
-             pendingInviteRef.current = null;
+            console.log("Sending invite to:", pendingInviteRef.current.name);
+            signaling.inviteDevice(
+              pendingInviteRef.current.id,
+              message.code,
+              "Sender" // We could use a real name if we had one
+            );
+            pendingInviteRef.current = null;
           }
         }
       });
@@ -779,9 +799,8 @@ export default function SendPage() {
   };
 
   const copyLink = () => {
-    const url = `${
-      typeof window !== "undefined" ? window.location.origin : ""
-    }/receive?code=${sessionCode}`;
+    const url = `${typeof window !== "undefined" ? window.location.origin : ""
+      }/receive?code=${sessionCode}`;
     navigator.clipboard.writeText(url);
     setCopyStatus("link");
     setTimeout(() => setCopyStatus("none"), 2000);
@@ -826,6 +845,8 @@ export default function SendPage() {
 
     // Reset state
     setStep("select");
+    setPairingMethod(null);
+    setPairedDeviceName("");
     setFiles([]);
     setSessionCode("");
     setProgressList([]);
@@ -881,26 +902,26 @@ export default function SendPage() {
            animation: pulse-ring 2s infinite;
          }
       `}</style>
-      
+
       {/* Header */}
       <header className="border-b bg-white/60 backdrop-blur-md shadow-sm sticky top-0 z-20">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <Link
             href="/"
-            className="inline-flex items-center gap-2 text-gray-700 hover:text-purple-700 font-semibold transition-colors"
+            className="inline-flex items-center gap-2 text-purple-900 hover:text-purple-700 font-semibold transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
             <span>Back</span>
           </Link>
           <div className="flex items-center gap-2 sm:gap-4">
-             {isOffline && (
+            {isOffline && (
               <span className="text-red-600 font-semibold flex items-center gap-1 text-sm animate-pulse">
                 <Wifi className="w-4 h-4" />
                 Offline
               </span>
             )}
             <div className="hidden sm:block">
-               <UserIdentityDisplay />
+              <UserIdentityDisplay />
             </div>
           </div>
         </div>
@@ -948,12 +969,12 @@ export default function SendPage() {
                   <Upload className="w-10 h-10 text-white" />
                 </div>
                 <div className="sm:hidden mb-6 flex justify-center">
-                    <UserIdentityDisplay />
+                  <UserIdentityDisplay />
                 </div>
-                <h2 className="text-3xl font-black text-gray-800 mb-2 tracking-tight">
+                <h2 className="text-3xl font-black text-purple-900 mb-2 tracking-tight">
                   Send Files
                 </h2>
-                <p className="text-gray-500 text-base max-w-md mx-auto">
+                <p className="text-purple-600/70 text-base max-w-md mx-auto">
                   Select files or folders to share secure & fast with devices nearby.
                 </p>
               </div>
@@ -969,15 +990,15 @@ export default function SendPage() {
                     className="w-5 h-5 accent-purple-600 rounded cursor-pointer"
                   />
                   <div className="flex flex-col">
-                      <label
-                        htmlFor="sendAsZip"
-                        className="text-sm font-bold text-gray-700 cursor-pointer"
-                      >
-                        Pack as ZIP Archive
-                      </label>
-                      <span className="text-xs text-gray-500">
-                        Preserves folder structure and downloads as a single file.
-                      </span>
+                    <label
+                      htmlFor="sendAsZip"
+                      className="text-sm font-bold text-gray-700 cursor-pointer"
+                    >
+                      Pack as ZIP Archive
+                    </label>
+                    <span className="text-xs text-gray-500">
+                      Preserves folder structure and downloads as a single file.
+                    </span>
                   </div>
                 </div>
               </div>
@@ -992,7 +1013,7 @@ export default function SendPage() {
                     onChange={handleFileSelect}
                     className="hidden"
                   />
-                  <div className="w-full bg-purple-600 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-all font-bold shadow-lg shadow-gray-200 group-hover:scale-[1.02] flex items-center justify-center gap-2">
+                  <div className="w-full bg-purple-600 text-white py-4 px-6 rounded-xl hover:bg-purple-700 transition-all font-bold shadow-lg shadow-purple-200 group-hover:scale-[1.02] flex items-center justify-center gap-2">
                     <Upload className="w-5 h-5" />
                     {files.length > 0 ? "Add Files" : "Select Files"}
                   </div>
@@ -1011,33 +1032,40 @@ export default function SendPage() {
                       }
                     }}
                   />
-                  <div className="w-full bg-white text-gray-900 border-2 border-gray-100 py-4 px-6 rounded-xl hover:border-purple-200 hover:bg-purple-50 transition-all font-bold group-hover:scale-[1.02] flex items-center justify-center gap-2">
+                  <div className="w-full bg-white text-purple-900 border-2 border-purple-100 py-4 px-6 rounded-xl hover:border-purple-200 hover:bg-purple-50 transition-all font-bold group-hover:scale-[1.02] flex items-center justify-center gap-2">
                     <span className="text-2xl leading-none">📁</span>
                     {files.length > 0 ? "Add Folder" : "Select Folder"}
                   </div>
                 </label>
               </div>
 
+              {/* Nearby Devices Scanner - Moved up for better mobile visibility */}
+              <NearbyDevices
+                signaling={discoveryClient}
+                deviceName={name || "Sender"}
+                role="sender"
+                onPair={handlePairDevice}
+              />
+
               {/* Drag & Drop Zone */}
               <div
-                className={`border-3 border-dashed rounded-2xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-300 ${
-                  isDragActive
-                    ? "border-purple-500 bg-purple-50 scale-[1.01] shadow-xl"
-                    : "border-gray-200 hover:border-purple-300 hover:bg-gray-50/50"
-                }`}
+                className={`border-3 border-dashed rounded-2xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-300 ${isDragActive
+                  ? "border-purple-500 bg-purple-50 scale-[1.01] shadow-xl"
+                  : "border-purple-100 hover:border-purple-300 hover:bg-purple-50/50"
+                  }`}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
               >
-                <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 transition-colors ${isDragActive ? 'bg-purple-100' : 'bg-gray-100'}`}>
-                    <Upload className={`w-8 h-8 ${isDragActive ? 'text-purple-600' : 'text-gray-400'}`} />
+                <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 transition-colors ${isDragActive ? 'bg-purple-100' : 'bg-purple-100/50'}`}>
+                  <Upload className={`w-8 h-8 ${isDragActive ? 'text-purple-600' : 'text-purple-300'}`} />
                 </div>
-                <p className="text-lg text-gray-700 mb-1 font-bold">
+                <p className="text-lg text-purple-800 mb-1 font-bold">
                   {files.length > 0
                     ? "Drop more files here"
                     : "Drag & Drop files here"}
                 </p>
-                <p className="text-xs text-gray-400 font-medium tracking-wide uppercase">Max 2GB per file</p>
+                <p className="text-xs text-purple-400 font-medium tracking-wide uppercase">Max 2GB per file</p>
               </div>
 
               {/* Selected Files Grid */}
@@ -1076,28 +1104,28 @@ export default function SendPage() {
                           {/* Image Preview */}
                           <div className="aspect-square w-full rounded-lg bg-gray-50 flex items-center justify-center mb-3 overflow-hidden">
                             {isImage ? (
-                                <img
+                              <img
                                 src={URL.createObjectURL(f)}
                                 alt={f.name}
                                 className="w-full h-full object-cover"
                                 loading="lazy"
                                 onLoad={(e) =>
-                                    URL.revokeObjectURL(
+                                  URL.revokeObjectURL(
                                     (e.target as HTMLImageElement).src
-                                    )
+                                  )
                                 }
-                                />
+                              />
                             ) : (
-                                <span className="text-3xl opacity-50">
-                                    {isVideo ? '🎬' : isAudio ? '🎵' : '📄'}
-                                </span>
+                              <span className="text-3xl opacity-50">
+                                {isVideo ? '🎬' : isAudio ? '🎵' : '📄'}
+                              </span>
                             )}
                           </div>
 
-                          <span className="font-semibold text-gray-800 break-all text-center text-xs mb-0.5 line-clamp-2 w-full">
+                          <span className="font-semibold text-purple-900 break-all text-center text-xs mb-0.5 line-clamp-2 w-full">
                             {f.name}
                           </span>
-                          <span className="text-[10px] text-gray-400 font-medium">
+                          <span className="text-[10px] text-purple-400 font-medium">
                             {formatBytes(f.size)}
                           </span>
                         </div>
@@ -1107,60 +1135,110 @@ export default function SendPage() {
                 </div>
               )}
 
-              {/* Nearby Devices Scanner */}
-               <NearbyDevices 
-                 signaling={discoveryClient}
-                 deviceName={name || "Sender"}
-                 role="sender"
-                 onPair={handlePairDevice}
-               />
             </div>
           )}
 
-          {/* WAITING STEP */}
-          {step === "waiting" && (
-            <div className="bg-white rounded-3xl shadow-2xl p-6 sm:p-10 border border-gray-100">
-              <div className="text-center mb-8">
-                <div className="relative w-24 h-24 mx-auto mb-6">
-                    <div className="absolute inset-0 bg-blue-100 rounded-full animate-ping opacity-20"></div>
-                    <div className="relative w-24 h-24 bg-linear-to-tr from-blue-500 to-indigo-600 rounded-full flex items-center justify-center shadow-xl">
-                         <Wifi className="w-10 h-10 text-white animate-pulse" />
-                    </div>
+          {/* CONNECTING STEP - New step for nearby device pairing */}
+          {step === "connecting" && pairingMethod === "nearby" && (
+            <div className="bg-white rounded-3xl shadow-2xl p-8 sm:p-12 text-center animate-fade-in border border-purple-100">
+              <div className="relative w-24 h-24 mx-auto mb-6">
+                <div className="absolute inset-0 bg-purple-200 rounded-full animate-ping opacity-20"></div>
+                <div className="relative w-24 h-24 bg-gradient-to-tr from-purple-500 to-indigo-600 rounded-full flex items-center justify-center shadow-xl">
+                  <Smartphone className="w-10 h-10 text-white" />
                 </div>
-                
-                <h2 className="text-3xl font-black text-gray-900 mb-2">
-                  Ready to Send
-                </h2>
-                <p className="text-gray-500 font-medium">Scan QR code or open link on receiver</p>
+              </div>
+
+              <h2 className="text-3xl font-black text-purple-900 mb-2">
+                Connecting to Device
+              </h2>
+              <p className="text-purple-600 font-medium mb-6">
+                Establishing secure connection with
+              </p>
+
+              <div className="inline-flex items-center gap-3 bg-purple-50 px-6 py-3 rounded-full mb-8 border border-purple-100">
+                <div className="w-10 h-10 bg-gradient-to-br from-purple-100 to-blue-100 rounded-full flex items-center justify-center">
+                  <Smartphone className="w-5 h-5 text-purple-600" />
+                </div>
+                <span className="font-bold text-purple-900">{pairedDeviceName}</span>
               </div>
 
               {/* Show selected files preview */}
               {files.length > 0 && (
-                <div className="bg-gray-50/80 rounded-xl p-4 mb-8 border border-gray-100">
+                <div className="bg-purple-50/80 rounded-xl p-4 border border-purple-100 max-w-sm mx-auto">
                   <div className="flex justify-between items-center mb-2">
-                       <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Sending</span>
-                       <span className="text-xs font-bold text-gray-700 bg-white px-2 py-0.5 rounded-full shadow-sm">{files.length} files</span>
+                    <span className="text-xs font-bold text-purple-400 uppercase tracking-wider">Preparing to send</span>
+                    <span className="text-xs font-bold text-purple-700 bg-white px-2 py-0.5 rounded-full shadow-sm">{files.length} files</span>
+                  </div>
+                  <div className="flex -space-x-2 overflow-hidden mb-2 justify-center">
+                    {files.slice(0, 5).map((f, i) => (
+                      <div key={i} className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-purple-100 flex items-center justify-center text-xs shadow-sm">
+                        {f.type.startsWith('image') ? '🖼️' : '📄'}
+                      </div>
+                    ))}
+                    {files.length > 5 && (
+                      <div className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-purple-100 flex items-center justify-center text-[10px] font-bold text-purple-500">
+                        +{files.length - 5}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-xs text-purple-500 font-medium">
+                    Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-center gap-2 mt-8">
+                <div className="w-2.5 h-2.5 bg-purple-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-2.5 h-2.5 bg-purple-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                <div className="w-2.5 h-2.5 bg-purple-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+              </div>
+            </div>
+          )}
+
+          {/* WAITING STEP - Only show for QR code method */}
+          {step === "waiting" && pairingMethod === "qr" && (
+            <div className="bg-white rounded-3xl shadow-2xl p-6 sm:p-10 border border-purple-100">
+              <div className="text-center mb-8">
+                <div className="relative w-24 h-24 mx-auto mb-6">
+                  <div className="absolute inset-0 bg-purple-100 rounded-full animate-ping opacity-20"></div>
+                  <div className="relative w-24 h-24 bg-linear-to-tr from-purple-500 to-indigo-600 rounded-full flex items-center justify-center shadow-xl">
+                    <Wifi className="w-10 h-10 text-white animate-pulse" />
+                  </div>
+                </div>
+
+                <h2 className="text-3xl font-black text-purple-900 mb-2">
+                  Ready to Send
+                </h2>
+                <p className="text-purple-600 font-medium">Scan QR code or open link on receiver</p>
+              </div>
+
+              {/* Show selected files preview */}
+              {files.length > 0 && (
+                <div className="bg-purple-50/80 rounded-xl p-4 mb-8 border border-purple-100">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-bold text-purple-400 uppercase tracking-wider">Sending</span>
+                    <span className="text-xs font-bold text-purple-700 bg-white px-2 py-0.5 rounded-full shadow-sm">{files.length} files</span>
                   </div>
                   <div className="flex -space-x-2 overflow-hidden mb-2">
-                      {files.slice(0, 5).map((f, i) => (
-                          <div key={i} className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-gray-200 flex items-center justify-center text-xs shadow-sm">
-                             {f.type.startsWith('image') ? '🖼️' : '📄'}
-                          </div>
-                      ))}
-                      {files.length > 5 && (
-                          <div className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-gray-100 flex items-center justify-center text-[10px] font-bold text-gray-500">
-                              +{files.length - 5}
-                          </div>
-                      )}
+                    {files.slice(0, 5).map((f, i) => (
+                      <div key={i} className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-purple-100 flex items-center justify-center text-xs shadow-sm">
+                        {f.type.startsWith('image') ? '🖼️' : '📄'}
+                      </div>
+                    ))}
+                    {files.length > 5 && (
+                      <div className="inline-block h-8 w-8 rounded-full ring-2 ring-white bg-purple-50 flex items-center justify-center text-[10px] font-bold text-purple-500">
+                        +{files.length - 5}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-gray-500 font-medium">
-                      Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
+                  <div className="text-xs text-purple-500 font-medium">
+                    Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
                   </div>
                 </div>
               )}
 
               <div className="bg-white border-2 border-indigo-100 rounded-2xl p-6 mb-8 flex flex-col items-center w-full max-w-xs sm:max-w-sm mx-auto shadow-sm">
-                
+
                 <div className="text-5xl font-mono font-bold text-indigo-600 text-center tracking-widest mb-6 select-all">
                   {sessionCode || "......"}
                 </div>
@@ -1168,53 +1246,51 @@ export default function SendPage() {
                   <>
                     <div className="mb-6 flex flex-col items-center w-full bg-white p-2 rounded-xl">
                       <QRCode
-                        value={`${
-                          typeof window !== "undefined"
-                            ? window.location.origin
-                            : ""
-                        }/receive?code=${sessionCode}`}
+                        value={`${typeof window !== "undefined"
+                          ? window.location.origin
+                          : ""
+                          }/receive?code=${sessionCode}`}
                         size={200}
                         className="rounded-lg"
                       />
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-3 w-full">
                       <button
                         onClick={copyCode}
                         className="col-span-1 bg-indigo-50 text-indigo-700 py-3 rounded-xl hover:bg-indigo-100 transition-colors font-bold text-sm flex flex-col items-center justify-center gap-1"
                       >
-                         <Copy className="w-4 h-4" />
-                         {copyStatus === "code" ? "Copied" : "Copy Code"}
+                        <Copy className="w-4 h-4" />
+                        {copyStatus === "code" ? "Copied" : "Copy Code"}
                       </button>
                       <button
                         onClick={copyLink}
                         className="col-span-1 bg-indigo-50 text-indigo-700 py-3 rounded-xl hover:bg-indigo-100 transition-colors font-bold text-sm flex flex-col items-center justify-center gap-1"
                       >
-                         <LinkIcon className="w-4 h-4" />
-                         {copyStatus === "link" ? "Copied" : "Copy Link"}
+                        <LinkIcon className="w-4 h-4" />
+                        {copyStatus === "link" ? "Copied" : "Copy Link"}
                       </button>
                     </div>
-                     <button
-                        onClick={() => {
-                          const url = `${
-                            typeof window !== "undefined"
-                              ? window.location.origin
-                              : ""
+                    <button
+                      onClick={() => {
+                        const url = `${typeof window !== "undefined"
+                          ? window.location.origin
+                          : ""
                           }/receive?code=${sessionCode}`;
-                          if (navigator.share) {
-                            navigator.share({
-                              title: "FluxDrop Session",
-                              text: "Join my FluxDrop session:",
-                              url,
-                            });
-                          } else {
-                            copyLink();
-                          }
-                        }}
-                        className="w-full mt-3 bg-indigo-600 text-white py-3 px-4 rounded-xl hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 font-bold shadow-lg shadow-indigo-200"
-                      >
-                         Share Link
-                      </button>
+                        if (navigator.share) {
+                          navigator.share({
+                            title: "FluxDrop Session",
+                            text: "Join my FluxDrop session:",
+                            url,
+                          });
+                        } else {
+                          copyLink();
+                        }
+                      }}
+                      className="w-full mt-3 bg-indigo-600 text-white py-3 px-4 rounded-xl hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 font-bold shadow-lg shadow-indigo-200"
+                    >
+                      Share Link
+                    </button>
                   </>
                 )}
               </div>
@@ -1231,57 +1307,62 @@ export default function SendPage() {
               <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
                 <Check className="w-10 h-10 text-green-600" />
               </div>
-              <h2 className="text-3xl font-black text-gray-900 mb-2">
+              <h2 className="text-3xl font-black text-purple-900 mb-2">
                 Connected!
               </h2>
-              <p className="text-gray-600 font-medium">Secure handshake established.</p>
+              <p className="text-purple-700 font-medium">
+                {pairingMethod === "nearby" && pairedDeviceName
+                  ? `Connected to ${pairedDeviceName}`
+                  : "Secure handshake established"}
+              </p>
             </div>
           )}
 
           {/* TRANSFERRING STEP */}
           {step === "transferring" && (
-            <div className="bg-white rounded-3xl shadow-xl p-6 sm:p-10 border border-gray-100">
-               <div className="flex items-center justify-between mb-8">
-                  <h2 className="text-2xl font-black text-gray-900">
-                    Sending Files...
-                  </h2>
-                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
-               </div>
-              
+            <div className="bg-white rounded-3xl shadow-xl p-6 sm:p-10 border border-purple-100">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-2xl font-black text-purple-900">
+                  Sending Files...
+                </h2>
+                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
+              </div>
+
               <div className="space-y-4">
                 {files.map((f, idx) => {
-                   const progress = progressList[idx] || 0;
-                   const isComplete = progress === 100;
-                   
-                   return (
-                  <div
-                    key={f.name + f.size}
-                    className="bg-gray-50 rounded-xl p-4 border border-gray-100"
-                  >
-                    <div className="flex justify-between items-center mb-3">
-                      <div className="flex items-center gap-3 overflow-hidden">
-                          <div className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${isComplete ? 'bg-green-100 text-green-600' : 'bg-blue-100 text-blue-600'}`}>
-                              {isComplete ? <Check className="w-5 h-5" /> : <Upload className="w-5 h-5" />}
+                  const progress = progressList[idx] || 0;
+                  const isComplete = progress === 100;
+
+                  return (
+                    <div
+                      key={f.name + f.size}
+                      className="bg-purple-50/50 rounded-xl p-4 border border-purple-100"
+                    >
+                      <div className="flex justify-between items-center mb-3">
+                        <div className="flex items-center gap-3 overflow-hidden">
+                          <div className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${isComplete ? 'bg-green-100 text-green-600' : 'bg-purple-100 text-purple-600'}`}>
+                            {isComplete ? <Check className="w-5 h-5" /> : <Upload className="w-5 h-5" />}
                           </div>
                           <div className="min-w-0">
-                              <div className="font-bold text-gray-900 text-sm truncate">{f.name}</div>
-                              <div className="text-xs text-gray-500">{formatBytes(f.size)}</div>
+                            <div className="font-bold text-purple-900 text-sm truncate">{f.name}</div>
+                            <div className="text-xs text-purple-500">{formatBytes(f.size)}</div>
                           </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-sm font-bold text-purple-900">{Math.round(progress)}%</div>
+                          <div className="text-xs text-purple-500/70 font-mono">{formatSpeed(speedList[idx] || 0)}</div>
+                        </div>
                       </div>
-                      <div className="text-right">
-                         <div className="text-sm font-bold text-gray-900">{Math.round(progress)}%</div>
-                         <div className="text-xs text-gray-500 font-mono">{formatSpeed(speedList[idx] || 0)}</div>
+
+                      <div className="w-full h-2 bg-purple-100 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-300 ease-out rounded-full ${isComplete ? 'bg-green-500' : 'bg-purple-600'}`}
+                          style={{ width: `${progress}%` }}
+                        />
                       </div>
                     </div>
-                    
-                    <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full transition-all duration-300 ease-out rounded-full ${isComplete ? 'bg-green-500' : 'bg-indigo-600'}`}
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                  </div>
-                )})}
+                  )
+                })}
               </div>
             </div>
           )}
@@ -1292,15 +1373,15 @@ export default function SendPage() {
               <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
                 <Check className="w-12 h-12 text-green-600" />
               </div>
-              <h2 className="text-3xl font-black text-gray-900 mb-2">
+              <h2 className="text-3xl font-black text-purple-900 mb-2">
                 All Done!
               </h2>
-              <p className="text-gray-600 mb-8 font-medium">
+              <p className="text-purple-700 mb-8 font-medium">
                 Successfully sent {files.length} {files.length === 1 ? 'file' : 'files'}.
               </p>
               <button
                 onClick={reset}
-                className="w-full bg-purple-900 text-white py-4 px-6 rounded-xl hover:bg-gray-800 transition-colors font-bold shadow-lg"
+                className="w-full bg-purple-700 text-white py-4 px-6 rounded-xl hover:bg-purple-800 transition-colors font-bold shadow-lg"
               >
                 Send More Files
               </button>
@@ -1311,20 +1392,20 @@ export default function SendPage() {
 
       {/* FLOATING ACTION BAR */}
       {files.length > 0 && step === "select" && (
-        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white/80 backdrop-blur-xl border-t border-gray-200 shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] animate-slide-up">
+        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white/80 backdrop-blur-xl border-t border-purple-100 shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] animate-slide-up">
           <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between gap-4">
             <div className="flex flex-col min-w-0">
-              <span className="font-bold text-gray-900 text-sm">
+              <span className="font-bold text-purple-950 text-sm">
                 {files.length} {files.length === 1 ? "file" : "files"} selected
               </span>
-              <span className="text-xs text-gray-500 truncate font-medium">
+              <span className="text-xs text-purple-600 truncate font-medium">
                 Total size: {formatBytes(files.reduce((acc, f) => acc + f.size, 0))}
               </span>
             </div>
             <button
               onClick={handleSend}
               disabled={!readyToSend}
-              className="bg-purple-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-purple-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed shadow-lg hover:shadow-purple-200 flex items-center gap-2 whitespace-nowrap active:scale-95 transform"
+              className="bg-purple-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-purple-700 transition-colors disabled:bg-purple-100 disabled:text-purple-300 disabled:cursor-not-allowed shadow-lg hover:shadow-purple-200 flex items-center gap-2 whitespace-nowrap active:scale-95 transform"
             >
               Send Now
               <User className="w-4 h-4 ml-1 opacity-70" />
