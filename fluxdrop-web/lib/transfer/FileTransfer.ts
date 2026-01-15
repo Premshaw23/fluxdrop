@@ -839,105 +839,124 @@ export class FileTransferReceiver {
     this.onMetadata?.(metadata);
   }
 
-  private async handleChunk(
-    fileIndex: number,
-    chunkIndex: number,
-    data: ArrayBuffer,
-    iv?: number[],
-    hash?: string
-  ) {
-    const state = this.fileStates.get(fileIndex);
-    if (!state) {
-      console.error(`[FileTransferReceiver] No state for file ${fileIndex}`);
-      return;
-    }
+private async handleChunk(
+  fileIndex: number,
+  chunkIndex: number,
+  data: ArrayBuffer,
+  iv?: number[],
+  hash?: string
+) {
+  const state = this.fileStates.get(fileIndex);
+  if (!state) {
+    console.error(`[FileTransferReceiver] No state for file ${fileIndex}`);
+    return;
+  }
 
-    // ✅ FIX: Check for duplicate FIRST (before decryption)
-    if (state.receivedChunkBitmap[chunkIndex]) {
-      console.warn(`[FileTransferReceiver] Duplicate chunk ${chunkIndex} of file ${fileIndex} - ignoring`);
-      return;
-    }
-
-    // Decrypt if needed
-    let chunkData: ArrayBuffer;
-    if (this.decryptionKey && iv) {
-      try {
-        chunkData = await decryptAESGCM(
-          this.decryptionKey,
-          data,
-          new Uint8Array(iv)
-        );
-      } catch (e) {
-        console.error(`[FileTransferReceiver] Decryption failed for chunk ${chunkIndex}`, e);
-        this.onError?.(new Error(`Decryption failed for chunk ${chunkIndex}`));
-        return;
-      }
-    } else {
-      chunkData = data;
-    }
-
-    // ✅ FIX: Verify hash BEFORE marking as received
-    if (hash) {
-      const hashBuffer = await sha256(chunkData);
-      const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
-      if (hashB64 !== hash) {
-        this.logError(`Chunk ${chunkIndex} of file ${fileIndex} integrity check failed`);
-        // Don't mark as received, don't send ACK, request resend
-        setTimeout(() => {
-          this.sendControlMessage({
-            type: "resume-request",
-            missingChunks: [chunkIndex],
-            fileIndex,
-          });
-        }, 1000);
-        return;
-      }
-    }
-
-    // Validate index
-    if (chunkIndex < 0 || chunkIndex >= state.metadata.chunks) {
-      console.error(`[FileTransferReceiver] Invalid chunk index ${chunkIndex}`);
-      return;
-    }
-
-    // Store chunk and mark as received BEFORE sending ACK
-    state.receivedChunks.set(chunkIndex, chunkData);
-    state.receivedChunkBitmap[chunkIndex] = true;
-    state.bytesReceived += chunkData.byteLength;
-
-    // Send ack AFTER verification
+  // ✅ CRITICAL FIX #1: Check for duplicate BEFORE any processing
+  if (state.receivedChunkBitmap[chunkIndex]) {
+    console.warn(
+      `[FileTransferReceiver] Duplicate chunk ${chunkIndex} of file ${fileIndex} - still sending ACK`
+    );
+    // ⚠️ IMPORTANT: Still send ACK for duplicates!
+    // This prevents sender from thinking chunk is lost
     this.sendControlMessage({
       type: "chunk-ack",
       chunkIndex,
       fileIndex,
     });
+    return;
+  }
 
-    const receivedCount = state.receivedChunkBitmap.filter((b) => b).length;
+  // ✅ CRITICAL FIX #2: Validate index BEFORE decryption
+  if (chunkIndex < 0 || chunkIndex >= state.metadata.chunks) {
+    console.error(
+      `[FileTransferReceiver] Invalid chunk index ${chunkIndex} for file ${fileIndex}`
+    );
+    return;
+  }
 
-    // ✅ FIX: Call updateProgress with fileIndex
-    this.updateProgress(fileIndex, state);
+  // Decrypt if needed
+  let chunkData: ArrayBuffer;
+  if (this.decryptionKey && iv) {
+    try {
+      chunkData = await decryptAESGCM(
+        this.decryptionKey,
+        data,
+        new Uint8Array(iv)
+      );
+    } catch (e) {
+      console.error(
+        `[FileTransferReceiver] Decryption failed for chunk ${chunkIndex} of file ${fileIndex}`,
+        e
+      );
+      // ⚠️ Request resend on decryption failure
+      setTimeout(() => {
+        this.sendControlMessage({
+          type: "resume-request",
+          missingChunks: [chunkIndex],
+          fileIndex,
+        });
+      }, 1000);
+      return;
+    }
+  } else {
+    chunkData = data;
+  }
 
-  // ✅ FIX: Auto-complete when all chunks received
+  // ✅ CRITICAL FIX #3: Verify hash BEFORE marking as received
+  if (hash) {
+    const hashBuffer = await sha256(chunkData);
+    const hashB64 = btoa(
+      String.fromCharCode(...new Uint8Array(hashBuffer))
+    );
+    if (hashB64 !== hash) {
+      console.error(
+        `[FileTransferReceiver] Hash mismatch for chunk ${chunkIndex} of file ${fileIndex}`
+      );
+      // ⚠️ Request resend on hash failure
+      setTimeout(() => {
+        this.sendControlMessage({
+          type: "resume-request",
+          missingChunks: [chunkIndex],
+          fileIndex,
+        });
+      }, 1000);
+      return;
+    }
+  }
+
+  // ✅ NOW safe to store chunk and mark as received
+  state.receivedChunks.set(chunkIndex, chunkData);
+  state.receivedChunkBitmap[chunkIndex] = true;
+  state.bytesReceived += chunkData.byteLength;
+
+  // ✅ CRITICAL FIX #4: ALWAYS send ACK (even if we're going to complete immediately)
+  this.sendControlMessage({
+    type: "chunk-ack",
+    chunkIndex,
+    fileIndex,
+  });
+
+  const receivedCount = state.receivedChunkBitmap.filter((b) => b).length;
+
+  console.log(
+    `[FileTransferReceiver] Chunk ${chunkIndex}/${state.metadata.chunks} received for file ${fileIndex} (${receivedCount}/${state.metadata.chunks} total)`
+  );
+
+  this.updateProgress(fileIndex, state);
+
+  // ✅ CRITICAL FIX #5: Complete IMMEDIATELY when all chunks received
+  // Don't wait for "complete" message - it might have already arrived
   if (receivedCount === state.metadata.chunks) {
-    console.log(`[FileTransferReceiver] All ${receivedCount} chunks received for file ${fileIndex}`);
-    await this.completeFile(fileIndex, state);
-  } else if (state.completeMessageReceived) {
-    // ✅ FIX: If complete message was received but still missing chunks, request them ONCE
-    const missingChunks: number[] = [];
-    for (let i = 0; i < state.metadata.chunks; i++) {
-      if (!state.receivedChunkBitmap[i]) {
-        missingChunks.push(i);
-      }
-    }
+    console.log(
+      `[FileTransferReceiver] 🎉 All ${receivedCount} chunks received for file ${fileIndex}!`
+    );
     
-    if (missingChunks.length > 0 && missingChunks.length <= 5) { // Only if very few chunks missing
-      console.log(`[FileTransferReceiver] Requesting ${missingChunks.length} remaining chunks during stream`);
-      this.sendControlMessage({
-        type: "resume-request",
-        missingChunks,
-        fileIndex,
-      });
-    }
+    // ✅ Send ack-all BEFORE completing to stop sender immediately
+    this.sendAckAll(fileIndex);
+    
+    // Complete file (will ignore if already in progress)
+    await this.completeFile(fileIndex, state);
   }
 }
 
@@ -970,130 +989,202 @@ private async handleComplete(fileIndex: number) {
     return;
   }
 
-  console.log(`[FileTransferReceiver] Complete message for file ${fileIndex}`);
-
   // Mark that complete message was received
   state.completeMessageReceived = true;
 
-  // Check if all chunks received
   const receivedCount = state.receivedChunkBitmap.filter((b) => b).length;
   
+  console.log(
+    `[FileTransferReceiver] Complete message for file ${fileIndex}: ${receivedCount}/${state.metadata.chunks} chunks received`
+  );
+
   if (receivedCount === state.metadata.chunks) {
-    // All chunks present, complete immediately
+    // All chunks already received - complete immediately
+    console.log(`[FileTransferReceiver] All chunks present, completing immediately`);
     await this.completeFile(fileIndex, state);
-  } else {
-    // Wait for missing chunks
+    return;
+  }
+
+  // ✅ CRITICAL FIX: Initialize wait tracking
+  if (state.completeWaitStartTime === 0) {
+    state.completeWaitStartTime = Date.now();
+  }
+
+  const elapsed = Date.now() - state.completeWaitStartTime;
+
+  // ✅ CRITICAL FIX: More lenient timeout (60s -> 120s for large files)
+  const timeout = state.metadata.size > 100 * 1024 * 1024 ? 120000 : 60000; // 2min for files >100MB
+
+  if (elapsed > timeout) {
     const missingChunks: number[] = [];
     for (let i = 0; i < state.metadata.chunks; i++) {
       if (!state.receivedChunkBitmap[i]) {
         missingChunks.push(i);
       }
     }
-
-    console.log(`[FileTransferReceiver] File ${fileIndex} missing ${missingChunks.length} chunks, requesting...`);
     
-    // ✅ FIX: Initialize wait tracking
-    if (state.completeWaitStartTime === 0) {
-      state.completeWaitStartTime = Date.now();
-    }
-
-    const elapsed = Date.now() - state.completeWaitStartTime;
-    
-    // ✅ FIX: Abort after timeout with clear error
-    if (elapsed > this.RECEIVER_WAIT_TIMEOUT_MS) {
-      const errorMsg = `Transfer incomplete: ${missingChunks.length} chunks never arrived after ${elapsed}ms`;
-      console.error(`[FileTransferReceiver] ${errorMsg}`);
-      this.onError?.(new Error(errorMsg));
-      
-      // Clean up failed file to prevent further resume requests
-      this.fileStates.delete(fileIndex);
-      return;
-    }
-
-    // ✅ FIX: Only request chunks if we haven't recently (smarter request timing)
-    const timeSinceLastRequest = Date.now() - (state.lastMissingChunkRequest || 0);
-    const requestDelay = Math.min(10000, 2000 + (elapsed / 5)); // Start at 2s, increase to 10s
-    
-    if (timeSinceLastRequest < requestDelay) {
-      console.log(`[FileTransferReceiver] Waiting ${Math.round(requestDelay - timeSinceLastRequest)}ms before next request`);
-      setTimeout(() => this.handleComplete(fileIndex), requestDelay - timeSinceLastRequest);
-      return;
-    }
-
-    // Send request for missing chunks
-    state.lastMissingChunkRequest = Date.now();
-    this.sendControlMessage({
-      type: "resume-request",
-      missingChunks,
-      fileIndex,
-    });
-
-    console.log(`[FileTransferReceiver] Requested ${missingChunks.length} missing chunks (elapsed: ${elapsed}ms)`);
-
-    // ✅ FIX: Schedule a retry check with matching delay
-    setTimeout(() => {
-      // Only retry if still incomplete
-      const currentState = this.fileStates.get(fileIndex);
-      if (!currentState || currentState.completeFileInProgress) return; 
-      
-      const currentReceived = currentState.receivedChunkBitmap.filter((b) => b).length;
-      if (currentReceived < currentState.metadata.chunks) {
-        console.log(`[FileTransferReceiver] Retry check: still missing ${currentState.metadata.chunks - currentReceived} chunks`);
-        this.handleComplete(fileIndex); // ✅ Recursive retry until timeout or complete
-      }
-    }, requestDelay);
+    const errorMsg = `Transfer incomplete for file ${fileIndex}: ${missingChunks.length} chunks never arrived after ${elapsed}ms. Missing chunks: ${missingChunks.slice(0, 20).join(", ")}${missingChunks.length > 20 ? "..." : ""}`;
+    console.error(`[FileTransferReceiver] ${errorMsg}`);
+    this.onError?.(new Error(errorMsg));
+    this.fileStates.delete(fileIndex);
+    return;
   }
+
+  // Calculate missing chunks
+  const missingChunks: number[] = [];
+  for (let i = 0; i < state.metadata.chunks; i++) {
+    if (!state.receivedChunkBitmap[i]) {
+      missingChunks.push(i);
+    }
+  }
+
+  console.log(
+    `[FileTransferReceiver] File ${fileIndex} missing ${missingChunks.length} chunks: [${missingChunks.slice(0, 20).join(", ")}${missingChunks.length > 20 ? "..." : ""}]`
+  );
+
+  // ✅ CRITICAL FIX: Adaptive request timing based on missing chunk count
+  const timeSinceLastRequest = Date.now() - (state.lastMissingChunkRequest || 0);
+  
+  // More frequent requests for fewer missing chunks
+  let requestDelay: number;
+  if (missingChunks.length <= 5) {
+    requestDelay = 500; // 500ms for <5 chunks
+  } else if (missingChunks.length <= 20) {
+    requestDelay = 1000; // 1s for <20 chunks
+  } else if (missingChunks.length <= 50) {
+    requestDelay = 2000; // 2s for <50 chunks
+  } else {
+    requestDelay = Math.min(5000, 2000 + elapsed / 10); // Max 5s for large gaps
+  }
+
+  if (timeSinceLastRequest < requestDelay) {
+    const waitTime = requestDelay - timeSinceLastRequest;
+    console.log(
+      `[FileTransferReceiver] Waiting ${Math.round(waitTime)}ms before next request (${missingChunks.length} chunks missing)`
+    );
+    setTimeout(() => this.handleComplete(fileIndex), waitTime);
+    return;
+  }
+
+  // ✅ CRITICAL FIX: Batch missing chunks into groups of 50 to avoid overwhelming sender
+  const BATCH_SIZE = 50;
+  const chunksToRequest = missingChunks.slice(0, BATCH_SIZE);
+  
+  state.lastMissingChunkRequest = Date.now();
+  this.sendControlMessage({
+    type: "resume-request",
+    missingChunks: chunksToRequest,
+    fileIndex,
+  });
+
+  console.log(
+    `[FileTransferReceiver] Requested ${chunksToRequest.length} missing chunks (${missingChunks.length} total, elapsed: ${elapsed}ms)`
+  );
+
+  // ✅ CRITICAL FIX: Always schedule retry until complete or timeout
+  setTimeout(() => {
+    const currentState = this.fileStates.get(fileIndex);
+    if (!currentState || currentState.completeFileInProgress) {
+      return;
+    }
+
+    const currentReceived = currentState.receivedChunkBitmap.filter(
+      (b) => b
+    ).length;
+    if (currentReceived < currentState.metadata.chunks) {
+      console.log(
+        `[FileTransferReceiver] Retry check: still missing ${
+          currentState.metadata.chunks - currentReceived
+        } chunks`
+      );
+      this.handleComplete(fileIndex);
+    } else {
+      console.log(`[FileTransferReceiver] All chunks now received!`);
+      this.completeFile(fileIndex, currentState);
+    }
+  }, requestDelay);
 }
 
-  private async completeFile(fileIndex: number, state: any) {
-    if (state.completeFileInProgress) return;
-    state.completeFileInProgress = true;
-    console.log(`[FileTransferReceiver] Completing file ${fileIndex}`);
+private async completeFile(fileIndex: number, state: any) {
+  // ✅ CRITICAL FIX: Prevent duplicate completion
+  if (state.completeFileInProgress) {
+    console.log(`[FileTransferReceiver] File ${fileIndex} already completing, skipping`);
+    return;
+  }
+  
+  state.completeFileInProgress = true;
+  console.log(`[FileTransferReceiver] 🎬 Starting completion for file ${fileIndex}`);
 
-    // Build chunks array
-    const chunks: ArrayBuffer[] = [];
-    for (let i = 0; i < state.metadata.chunks; i++) {
-      const chunk = state.receivedChunks.get(i);
-      if (!chunk) {
-        this.onError?.(new Error(`Missing chunk ${i} for file ${fileIndex}`));
-        return;
-      }
-      chunks.push(chunk);
+  // ✅ CRITICAL FIX: Verify all chunks are present BEFORE building blob
+  const missingChunks: number[] = [];
+  for (let i = 0; i < state.metadata.chunks; i++) {
+    if (!state.receivedChunks.has(i)) {
+      missingChunks.push(i);
     }
+  }
 
-    // Create blob
-    const blob = new Blob(chunks, { type: state.metadata.type });
+  if (missingChunks.length > 0) {
+    console.error(
+      `[FileTransferReceiver] Cannot complete file ${fileIndex}: ${missingChunks.length} chunks still missing: [${missingChunks.slice(0, 20).join(", ")}${missingChunks.length > 20 ? "..." : ""}]`
+    );
+    state.completeFileInProgress = false; // Allow retry
+    
+    // Request missing chunks one more time
+    this.sendControlMessage({
+      type: "resume-request",
+      missingChunks: missingChunks.slice(0, 50), // Request first 50
+      fileIndex,
+    });
+    return;
+  }
 
-    // Validate size
-    if (blob.size !== state.metadata.size) {
-      const errorMsg = `File size mismatch for ${state.metadata.name}: received ${blob.size} bytes, expected ${state.metadata.size} bytes`;
-      console.error(`[FileTransferReceiver] ${errorMsg}`);
-      this.onError?.(new Error(errorMsg));
+  // Build chunks array
+  const chunks: ArrayBuffer[] = [];
+  for (let i = 0; i < state.metadata.chunks; i++) {
+    const chunk = state.receivedChunks.get(i);
+    if (!chunk) {
+      console.error(`[FileTransferReceiver] Missing chunk ${i} during final build`);
+      state.completeFileInProgress = false;
       return;
     }
-
-    // Calculate hash for verification
-    const arrayBuffer = await blob.arrayBuffer();
-    const hashBuffer = await sha256(arrayBuffer);
-    const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
-    
-    console.log(`[FileTransferReceiver] ✅ File ${fileIndex} complete:`, {
-      name: state.metadata.name,
-      size: blob.size,
-      sha256: hashB64,
-    });
-
-    // Send ack-all
-    this.sendAckAll(fileIndex);
-
-    // Call completion callback
-    if (typeof this.onComplete === "function") {
-      this.onComplete(blob, fileIndex);
-    }
-
-    // Clean up state
-    this.fileStates.delete(fileIndex);
+    chunks.push(chunk);
   }
+
+  // Create blob
+  const blob = new Blob(chunks, { type: state.metadata.type });
+
+  // Validate size
+  if (blob.size !== state.metadata.size) {
+    const errorMsg = `File size mismatch for ${state.metadata.name}: received ${blob.size} bytes, expected ${state.metadata.size} bytes (difference: ${Math.abs(blob.size - state.metadata.size)} bytes)`;
+    console.error(`[FileTransferReceiver] ${errorMsg}`);
+    this.onError?.(new Error(errorMsg));
+    state.completeFileInProgress = false;
+    return;
+  }
+
+  // Calculate hash for verification
+  const arrayBuffer = await blob.arrayBuffer();
+  const hashBuffer = await sha256(arrayBuffer);
+  const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+
+  console.log(`[FileTransferReceiver] ✅ File ${fileIndex} complete:`, {
+    name: state.metadata.name,
+    size: blob.size,
+    chunks: state.metadata.chunks,
+    sha256: hashB64.substring(0, 16) + "...",
+  });
+
+  // Send ack-all (might be redundant but ensures sender knows)
+  this.sendAckAll(fileIndex);
+
+  // Call completion callback
+  if (typeof this.onComplete === "function") {
+    this.onComplete(blob, fileIndex);
+  }
+
+  // Clean up state
+  this.fileStates.delete(fileIndex);
+}
 
   reset() {
     this.batchMetadata = [];
