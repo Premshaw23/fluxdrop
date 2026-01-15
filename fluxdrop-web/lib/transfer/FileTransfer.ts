@@ -241,45 +241,73 @@ export class FileTransferSender {
 
     const now = Date.now();
     const chunksToResend: number[] = [];
-    const failedChunks: number[] = []; // ✅ NEW: Track permanently failed chunks
+    const failedChunks: number[] = [];
+    const backedOffChunks: number[] = []; // ✅ NEW: Track chunks in backoff
     
     for (const idx of missingChunks) {
       const key = `${this._fileIndex}-${idx}`;
       
-      // ✅ FIX: More lenient max resends (50 instead of 10)
       const resendCount = this.chunkResendCounts.get(key) || 0;
       if (resendCount >= this.MAX_CHUNK_RESENDS) {
         console.error(`[FileTransferSender] Chunk ${idx} exceeded max resends (${resendCount})`);
-        failedChunks.push(idx); // ✅ Track failure
+        failedChunks.push(idx);
         continue;
       }
       
-      // ✅ FIX: Use exponential backoff for resend timing
       const lastSent = this.lastResendTime.get(key) || 0;
-      const backoffDelay = Math.min(5000, 100 * Math.pow(2, resendCount)); 
+      const backoffDelay = Math.min(5000, 100 * Math.pow(2, resendCount));
+      const timeSinceLastSend = now - lastSent;
       
-      if (now - lastSent < backoffDelay) {
-        console.warn(`[FileTransferSender] Skipping chunk ${idx} - in backoff (${now - lastSent}ms < ${backoffDelay}ms)`);
+      // ✅ CRITICAL FIX: Adaptive backoff based on request frequency
+      // If receiver keeps asking (< 1s since last request), reduce backoff
+      const isUrgentRequest = missingChunks.length <= 5; // Few chunks = urgent
+      const reducedBackoff = isUrgentRequest ? backoffDelay / 2 : backoffDelay;
+      
+      if (timeSinceLastSend < reducedBackoff) {
+        console.warn(
+          `[FileTransferSender] Chunk ${idx} in backoff (${timeSinceLastSend}ms < ${reducedBackoff}ms, attempt ${resendCount})`
+        );
+        backedOffChunks.push(idx);
         continue;
       }
       
       chunksToResend.push(idx);
     }
     
-    // ✅ FIX: Abort if any chunks permanently failed
+    // ✅ CRITICAL FIX: Abort if ANY chunks permanently failed
     if (failedChunks.length > 0) {
       this.onError?.(new Error(
-        `Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} attempts`
+        `Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} attempts. Failed chunks: ${failedChunks.slice(0, 10).join(", ")}`
       ));
       this.cancel();
       return;
+    }
+    
+    // ✅ CRITICAL FIX: If ALL chunks are backed off, force send anyway after 10 attempts
+    const allBackedOff = chunksToResend.length === 0 && backedOffChunks.length > 0;
+    if (allBackedOff) {
+      const firstChunkKey = `${this._fileIndex}-${backedOffChunks[0]}`;
+      const firstChunkAttempts = this.chunkResendCounts.get(firstChunkKey) || 0;
+      
+      // After 10+ requests for the same chunks, bypass backoff (receiver is desperate!)
+      if (firstChunkAttempts >= 10) {
+        console.warn(
+          `[FileTransferSender] 🔥 DEADLOCK DETECTED! Bypassing backoff for ${backedOffChunks.length} chunks (attempt ${firstChunkAttempts})`
+        );
+        chunksToResend.push(...backedOffChunks);
+      } else {
+        console.log(
+          `[FileTransferSender] All ${backedOffChunks.length} chunks in backoff, waiting...`
+        );
+        return;
+      }
     }
     
     if (chunksToResend.length === 0) {
       return;
     }
 
-    // ✅ FIX: Check if these chunks are already ACKed (prevent race condition)
+    // Check if chunks are already ACKed
     const actuallyMissing = chunksToResend.filter(idx => !this.acknowledgedChunks.has(idx));
     
     if (actuallyMissing.length === 0) {
@@ -288,7 +316,7 @@ export class FileTransferSender {
       return;
     }
 
-    // Check backpressure before resending batch
+    // Check backpressure
     const buffered = this.getBufferedAmount();
     if (buffered > CHUNK_SIZE * 5) {
       console.warn(`[FileTransferSender] High buffered amount (${formatBytes(buffered)}), delaying resends`);
@@ -296,7 +324,7 @@ export class FileTransferSender {
       return;
     }
 
-    console.log(`[FileTransferSender] Resending ${actuallyMissing.length} chunks after validation`);
+    console.log(`[FileTransferSender] 📤 Resending ${actuallyMissing.length} chunks`);
 
     for (const idx of actuallyMissing) {
       if (idx >= 0 && idx < this.chunks.length) {
@@ -328,13 +356,15 @@ export class FileTransferSender {
           hash: hashB64,
         });
         
-        // ✅ UPDATE: Track resend attempts
+        // Update tracking
         this.chunkResendCounts.set(key, (this.chunkResendCounts.get(key) || 0) + 1);
         this.lastResendTime.set(key, now);
         
-        console.log(`[FileTransferSender] Resent chunk ${idx} for file ${this._fileIndex} (attempt ${this.chunkResendCounts.get(key)})`);
+        console.log(
+          `[FileTransferSender] ✅ Resent chunk ${idx} for file ${this._fileIndex} (attempt ${this.chunkResendCounts.get(key)})`
+        );
         
-        // ✅ ADD: Varying delay between resends based on buffered amount
+        // Adaptive delay based on buffered amount
         const currentBuffered = this.getBufferedAmount();
         const resendDelay = currentBuffered > CHUNK_SIZE ? 100 : 30;
         await new Promise(resolve => setTimeout(resolve, resendDelay));
@@ -998,111 +1028,121 @@ private async handleComplete(fileIndex: number) {
     `[FileTransferReceiver] Complete message for file ${fileIndex}: ${receivedCount}/${state.metadata.chunks} chunks received`
   );
 
-  if (receivedCount === state.metadata.chunks) {
-    // All chunks already received - complete immediately
-    console.log(`[FileTransferReceiver] All chunks present, completing immediately`);
-    await this.completeFile(fileIndex, state);
-    return;
-  }
+  private async handleComplete(fileIndex: number) {
+    const state = this.fileStates.get(fileIndex);
+    if (!state) {
+      console.error(`[FileTransferReceiver] No state for file ${fileIndex}`);
+      return;
+    }
 
-  // ✅ CRITICAL FIX: Initialize wait tracking
-  if (state.completeWaitStartTime === 0) {
-    state.completeWaitStartTime = Date.now();
-  }
+    state.completeMessageReceived = true;
 
-  const elapsed = Date.now() - state.completeWaitStartTime;
+    const receivedCount = state.receivedChunkBitmap.filter((b) => b).length;
+    
+    console.log(
+      `[FileTransferReceiver] Complete message for file ${fileIndex}: ${receivedCount}/${state.metadata.chunks} chunks received`
+    );
 
-  // ✅ CRITICAL FIX: More lenient timeout (60s -> 120s for large files)
-  const timeout = state.metadata.size > 100 * 1024 * 1024 ? 120000 : 60000; // 2min for files >100MB
+    if (receivedCount === state.metadata.chunks) {
+      await this.completeFile(fileIndex, state);
+      return;
+    }
 
-  if (elapsed > timeout) {
+    if (state.completeWaitStartTime === 0) {
+      state.completeWaitStartTime = Date.now();
+    }
+
+    const elapsed = Date.now() - state.completeWaitStartTime;
+    const timeout = state.metadata.size > 100 * 1024 * 1024 ? 120000 : 60000;
+
+    if (elapsed > timeout) {
+      const missingChunks: number[] = [];
+      for (let i = 0; i < state.metadata.chunks; i++) {
+        if (!state.receivedChunkBitmap[i]) {
+          missingChunks.push(i);
+        }
+      }
+      
+      const errorMsg = `Transfer incomplete for file ${fileIndex}: ${missingChunks.length} chunks never arrived after ${elapsed}ms. Missing: ${missingChunks.slice(0, 20).join(", ")}`;
+      console.error(`[FileTransferReceiver] ${errorMsg}`);
+      this.onError?.(new Error(errorMsg));
+      this.fileStates.delete(fileIndex);
+      return;
+    }
+
     const missingChunks: number[] = [];
     for (let i = 0; i < state.metadata.chunks; i++) {
       if (!state.receivedChunkBitmap[i]) {
         missingChunks.push(i);
       }
     }
-    
-    const errorMsg = `Transfer incomplete for file ${fileIndex}: ${missingChunks.length} chunks never arrived after ${elapsed}ms. Missing chunks: ${missingChunks.slice(0, 20).join(", ")}${missingChunks.length > 20 ? "..." : ""}`;
-    console.error(`[FileTransferReceiver] ${errorMsg}`);
-    this.onError?.(new Error(errorMsg));
-    this.fileStates.delete(fileIndex);
-    return;
-  }
 
-  // Calculate missing chunks
-  const missingChunks: number[] = [];
-  for (let i = 0; i < state.metadata.chunks; i++) {
-    if (!state.receivedChunkBitmap[i]) {
-      missingChunks.push(i);
-    }
-  }
-
-  console.log(
-    `[FileTransferReceiver] File ${fileIndex} missing ${missingChunks.length} chunks: [${missingChunks.slice(0, 20).join(", ")}${missingChunks.length > 20 ? "..." : ""}]`
-  );
-
-  // ✅ CRITICAL FIX: Adaptive request timing based on missing chunk count
-  const timeSinceLastRequest = Date.now() - (state.lastMissingChunkRequest || 0);
-  
-  // More frequent requests for fewer missing chunks
-  let requestDelay: number;
-  if (missingChunks.length <= 5) {
-    requestDelay = 500; // 500ms for <5 chunks
-  } else if (missingChunks.length <= 20) {
-    requestDelay = 1000; // 1s for <20 chunks
-  } else if (missingChunks.length <= 50) {
-    requestDelay = 2000; // 2s for <50 chunks
-  } else {
-    requestDelay = Math.min(5000, 2000 + elapsed / 10); // Max 5s for large gaps
-  }
-
-  if (timeSinceLastRequest < requestDelay) {
-    const waitTime = requestDelay - timeSinceLastRequest;
     console.log(
-      `[FileTransferReceiver] Waiting ${Math.round(waitTime)}ms before next request (${missingChunks.length} chunks missing)`
+      `[FileTransferReceiver] File ${fileIndex} missing ${missingChunks.length} chunks`
     );
-    setTimeout(() => this.handleComplete(fileIndex), waitTime);
-    return;
-  }
 
-  // ✅ CRITICAL FIX: Batch missing chunks into groups of 50 to avoid overwhelming sender
-  const BATCH_SIZE = 50;
-  const chunksToRequest = missingChunks.slice(0, BATCH_SIZE);
-  
-  state.lastMissingChunkRequest = Date.now();
-  this.sendControlMessage({
-    type: "resume-request",
-    missingChunks: chunksToRequest,
-    fileIndex,
-  });
+    const timeSinceLastRequest = Date.now() - (state.lastMissingChunkRequest || 0);
+    
+    // ✅ CRITICAL FIX: Coordinate retry timing with sender's backoff
+    // Start fast, then slow down to match sender's exponential backoff
+    let requestDelay: number;
+    
+    // Count how many times we've requested (approximate from elapsed time)
+    const requestCount = Math.floor(elapsed / 1000); // Rough estimate
+    
+    if (missingChunks.length <= 5) {
+      // Few chunks: aggressive retry
+      requestDelay = Math.min(2000, 500 * Math.pow(1.5, requestCount / 5));
+    } else if (missingChunks.length <= 20) {
+      // Medium: moderate retry
+      requestDelay = Math.min(3000, 1000 * Math.pow(1.3, requestCount / 5));
+    } else {
+      // Many chunks: slower retry (give sender time to catch up)
+      requestDelay = Math.min(5000, 2000 * Math.pow(1.2, requestCount / 5));
+    }
 
-  console.log(
-    `[FileTransferReceiver] Requested ${chunksToRequest.length} missing chunks (${missingChunks.length} total, elapsed: ${elapsed}ms)`
-  );
-
-  // ✅ CRITICAL FIX: Always schedule retry until complete or timeout
-  setTimeout(() => {
-    const currentState = this.fileStates.get(fileIndex);
-    if (!currentState || currentState.completeFileInProgress) {
+    if (timeSinceLastRequest < requestDelay) {
+      const waitTime = requestDelay - timeSinceLastRequest;
+      console.log(
+        `[FileTransferReceiver] ⏳ Waiting ${Math.round(waitTime)}ms before next request (${missingChunks.length} missing, attempt ${requestCount})`
+      );
+      setTimeout(() => this.handleComplete(fileIndex), waitTime);
       return;
     }
 
-    const currentReceived = currentState.receivedChunkBitmap.filter(
-      (b) => b
-    ).length;
-    if (currentReceived < currentState.metadata.chunks) {
-      console.log(
-        `[FileTransferReceiver] Retry check: still missing ${
-          currentState.metadata.chunks - currentReceived
-        } chunks`
-      );
-      this.handleComplete(fileIndex);
-    } else {
-      console.log(`[FileTransferReceiver] All chunks now received!`);
-      this.completeFile(fileIndex, currentState);
-    }
-  }, requestDelay);
+    // Batch requests
+    const BATCH_SIZE = 50;
+    const chunksToRequest = missingChunks.slice(0, BATCH_SIZE);
+    
+    state.lastMissingChunkRequest = Date.now();
+    this.sendControlMessage({
+      type: "resume-request",
+      missingChunks: chunksToRequest,
+      fileIndex,
+    });
+
+    console.log(
+      `[FileTransferReceiver] 🔄 Requested ${chunksToRequest.length}/${missingChunks.length} missing chunks (elapsed: ${elapsed}ms, delay: ${requestDelay}ms)`
+    );
+
+    // Always schedule retry
+    setTimeout(() => {
+      const currentState = this.fileStates.get(fileIndex);
+      if (!currentState || currentState.completeFileInProgress) {
+        return;
+      }
+
+      const currentReceived = currentState.receivedChunkBitmap.filter(
+        (b) => b
+      ).length;
+      if (currentReceived < currentState.metadata.chunks) {
+        this.handleComplete(fileIndex);
+      } else {
+        console.log(`[FileTransferReceiver] ✅ All chunks received!`);
+        this.completeFile(fileIndex, currentState);
+      }
+    }, requestDelay);
+  }
 }
 
 private async completeFile(fileIndex: number, state: any) {
