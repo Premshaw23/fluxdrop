@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import dotenv from 'dotenv';
 import { SessionManager } from './session.js';
+import { DiscoveryService } from './discovery.js';
 import { validateMessage } from "./types/message.js";
 dotenv.config();
 const PORT = parseInt(process.env.PORT || '3001');
@@ -25,6 +26,7 @@ const server = createServer((req, res) => {
 // Create WebSocket server
 const wss = new WebSocketServer({ server });
 const sessionManager = new SessionManager();
+const discoveryService = new DiscoveryService();
 const clients = new Map();
 wss.on('connection', (ws, req) => {
     // Check origin
@@ -34,14 +36,42 @@ wss.on('connection', (ws, req) => {
         ws.close(1008, 'Origin not allowed');
         return;
     }
+    // Get IP address for discovery grouping
+    // Get IP address for discovery grouping
+    const forwardedFor = req.headers['x-forwarded-for'];
+    // Handle array or string headers securely
+    const forwardedIp = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor?.split(',')[0];
+    const ip = forwardedIp?.trim() ||
+        req.socket.remoteAddress ||
+        'unknown';
     const clientId = crypto.randomUUID();
-    clients.set(ws, { ws, id: clientId });
-    console.log(`✅ Client connected: ${clientId}`);
+    clients.set(ws, { ws, id: clientId, ip });
+    console.log(`✅ Client connected: ${clientId} (IP: ${ip})`);
+    // Debug headers if IP is unknown
+    if (ip === 'unknown' || ip === '::1') {
+        console.log('🔍 Headers:', JSON.stringify(req.headers));
+    }
     ws.on('message', async (data) => {
         try {
-            const message = JSON.parse(data.toString());
+            const rawMessage = JSON.parse(data.toString());
+            // DEBUG LOG
+            console.log('📨 Server received:', rawMessage.type);
+            // 🟢 DISCOVERY PROTOCOL (Strictly separated)
+            if (rawMessage.type && rawMessage.type.startsWith('discovery:')) {
+                try {
+                    await handleDiscoveryMessage(ws, rawMessage, ip, clientId);
+                }
+                catch (err) {
+                    console.error('Discovery error:', err);
+                    sendError(ws, `Discovery failed: ${err.message}`);
+                }
+                return;
+            }
+            // 🔵 SIGNALING PROTOCOL
+            const message = rawMessage;
             const validation = validateMessage(message);
             if (!validation.success) {
+                console.warn(`⚠️ Invalid message format from ${clientId}:`, validation.error);
                 sendError(ws, 'Invalid message format');
                 return;
             }
@@ -52,27 +82,83 @@ wss.on('connection', (ws, req) => {
             sendError(ws, 'Failed to process message');
         }
     });
-    ws.on('close', () => {
+    ws.on('close', async () => {
         const client = clients.get(ws);
-        if (client?.sessionCode) {
-            sessionManager.removeClient(client.sessionCode, client.role);
-            // Notify the other peer
-            const session = sessionManager.getSession(client.sessionCode);
-            if (session) {
-                const otherRole = client.role === 'sender' ? 'receiver' : 'sender';
-                const otherClient = session[otherRole];
-                if (otherClient) {
-                    send(otherClient, { type: 'peer-disconnected' });
+        if (client) {
+            // 1. Cleanup Sessions
+            if (client.sessionCode && client.role) {
+                const session = sessionManager.getSession(client.sessionCode);
+                await sessionManager.removeClient(client.sessionCode, client.role);
+                if (session) {
+                    const otherRole = client.role === 'sender' ? 'receiver' : 'sender';
+                    const otherClient = session[otherRole];
+                    if (otherClient && otherClient.readyState === WebSocket.OPEN) {
+                        send(otherClient, { type: 'peer-disconnected' });
+                        if (client.role === 'sender') {
+                            otherClient.close(1000, 'Sender disconnected');
+                        }
+                    }
                 }
             }
+            // 2. Cleanup Discovery
+            await discoveryService.removeDevice(client.ip, client.id);
+            clients.delete(ws);
+            console.log(`👋 Client disconnected: ${client.id}`);
         }
-        clients.delete(ws);
-        console.log(`👋 Client disconnected: ${client?.id}`);
     });
     ws.on('error', (error) => {
         console.error('WebSocket error:', error);
     });
 });
+async function handleDiscoveryMessage(ws, message, ip, clientId) {
+    switch (message.type) {
+        case 'discovery:announce':
+            // Client is announcing its presence
+            if (message.device) {
+                // Enforce the server-assigned ID to prevent spoofing
+                const device = { ...message.device, id: clientId };
+                await discoveryService.announceDevice(ip, device);
+                // Acknowledge
+                send(ws, { type: 'discovery:announced', device });
+                // Broadcast update to others on same IP? 
+                // Typically we wait for them to poll or we could pub/sub.
+                // For simplicity, let's just let them poll or re-announce.
+            }
+            break;
+        case 'discovery:list':
+            // Client wants to know who is nearby
+            const devices = await discoveryService.getPeers(ip);
+            // Filter out self
+            const others = devices.filter(d => d.id !== clientId);
+            send(ws, { type: 'discovery:peers', peers: others });
+            break;
+        case 'discovery:invite':
+            // Sender wants to invite a specific device to a session
+            if (message.targetId && message.code) {
+                // Find the target client connection
+                // We need to look up by ID. Our `clients` map is Map<WebSocket, ClientConnection>.
+                // This is O(N) unless we keep a secondary index. For now O(N) is fine for small scale.
+                let targetWs;
+                for (const [s, c] of clients.entries()) {
+                    if (c.id === message.targetId) {
+                        targetWs = s;
+                        break;
+                    }
+                }
+                if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                    send(targetWs, {
+                        type: 'discovery:invite',
+                        code: message.code,
+                        senderName: message.senderName || 'Someone'
+                    });
+                }
+            }
+            break;
+        default:
+            // Ignore unknown discovery messages safely
+            break;
+    }
+}
 async function handleMessage(ws, message) {
     const client = clients.get(ws);
     if (!client)
@@ -95,8 +181,8 @@ async function handleMessage(ws, message) {
     }
 }
 async function handleCreateSession(ws, client) {
-    const code = sessionManager.generateCode();
-    const session = sessionManager.createSession(code, ws);
+    const code = await sessionManager.generateCode();
+    const session = await sessionManager.createSession(code, ws);
     client.sessionCode = code;
     client.role = 'sender';
     send(ws, {
@@ -116,7 +202,11 @@ async function handleJoinSession(ws, client, code) {
         sendError(ws, 'Session already has a receiver');
         return;
     }
-    sessionManager.addReceiver(code, ws);
+    const added = await sessionManager.addReceiver(code, ws);
+    if (!added) {
+        sendError(ws, 'Failed to join session');
+        return;
+    }
     client.sessionCode = code;
     client.role = 'receiver';
     // Notify both parties
@@ -152,12 +242,43 @@ function sendError(ws, error) {
     send(ws, { type: 'error', error });
 }
 // Cleanup expired sessions every minute
-setInterval(() => {
-    const cleaned = sessionManager.cleanupExpired();
+setInterval(async () => {
+    const cleaned = await sessionManager.cleanupExpired();
     if (cleaned > 0) {
         console.log(`🧹 Cleaned up ${cleaned} expired sessions`);
     }
 }, 60000);
+// Graceful shutdown handlers
+process.on('SIGTERM', async () => {
+    console.log('🛑 SIGTERM received, shutting down gracefully...');
+    // Close all WebSocket connections
+    for (const [ws, client] of clients.entries()) {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.close(1000, 'Server shutting down');
+        }
+    }
+    // Shutdown managers
+    await sessionManager.shutdown();
+    await discoveryService.shutdown();
+    // Close WebSocket server
+    wss.close(() => {
+        console.log('✅ WebSocket server closed');
+    });
+    // Close HTTP server
+    server.close(() => {
+        console.log('✅ HTTP server closed');
+        process.exit(0);
+    });
+    // Force exit after 10 seconds
+    setTimeout(() => {
+        console.error('⚠️ Forced shutdown after timeout');
+        process.exit(1);
+    }, 10000);
+});
+process.on('SIGINT', async () => {
+    console.log('\n🛑 SIGINT received, shutting down gracefully...');
+    process.emit('SIGTERM');
+});
 server.listen(PORT, () => {
     console.log(`🚀 FluxDrop Signaling Server running on port ${PORT}`);
     console.log(`📡 WebSocket ready at ws://localhost:${PORT}`);

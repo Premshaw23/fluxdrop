@@ -52,14 +52,23 @@ wss.on('connection', (ws: WebSocket, req) => {
   }
 
   // Get IP address for discovery grouping
-  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')?.[0]?.trim() || 
+  // Get IP address for discovery grouping
+  const forwardedFor = req.headers['x-forwarded-for'];
+  // Handle array or string headers securely
+  const forwardedIp = Array.isArray(forwardedFor) ? forwardedFor[0] : (forwardedFor as string)?.split(',')[0];
+  
+  const ip = forwardedIp?.trim() || 
              req.socket.remoteAddress || 
              'unknown';
 
   const clientId = crypto.randomUUID();
   clients.set(ws, { ws, id: clientId, ip });
   
-  console.log(`✅ Client connected: ${clientId} (${ip})`);
+  console.log(`✅ Client connected: ${clientId} (IP: ${ip})`);
+  // Debug headers if IP is unknown
+  if (ip === 'unknown' || ip === '::1') {
+      console.log('🔍 Headers:', JSON.stringify(req.headers));
+  }
 
   ws.on('message', async (data: Buffer) => {
     try {

@@ -3,19 +3,25 @@ interface Session {
     code: string;
     sender: WebSocket;
     receiver?: WebSocket;
-    createdAt: Date;
-    expiresAt: Date;
+    createdAt: number;
+    expiresAt: number;
 }
 export declare class SessionManager {
     private sessions;
     private readonly SESSION_TIMEOUT;
-    generateCode(): string;
-    createSession(code: string, senderWs: WebSocket): Session;
+    private readonly reservedPrefix;
+    private readonly sessionPrefix;
+    private redis;
+    constructor();
+    generateCode(): Promise<string>;
+    createSession(code: string, sender: WebSocket): Promise<Session>;
     getSession(code: string): Session | undefined;
-    addReceiver(code: string, receiverWs: WebSocket): boolean;
-    removeClient(code: string, role: 'sender' | 'receiver'): void;
-    cleanupExpired(): number;
-    getActiveSessionCount(): number;
+    addReceiver(code: string, receiver: WebSocket): Promise<boolean>;
+    removeClient(code: string, role: 'sender' | 'receiver'): Promise<void>;
+    cleanupExpired(): Promise<number>;
+    getActiveSessionCount(): Promise<number>;
+    private forceDelete;
+    shutdown(): Promise<void>;
 }
 export {};
 //# sourceMappingURL=session.d.ts.map
