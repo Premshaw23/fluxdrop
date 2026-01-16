@@ -209,6 +209,8 @@ async function handleDiscoveryMessage(ws: WebSocket, message: any, ip: string, c
               code: message.code,
               senderName: message.senderName || 'Someone'
             });
+         } else {
+            send(ws, { type: 'error', error: 'Target device is no longer online' });
          }
        }
        break;

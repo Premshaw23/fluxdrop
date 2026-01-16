@@ -113,6 +113,7 @@ export default function SendPage() {
   // CRITICAL FIX: Prevent duplicate operations
   const isResettingRef = useRef(false);
   const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Discovery & Invite State
   const [discoveryClient, setDiscoveryClient] = useState<SignalingClient | null>(
@@ -189,9 +190,12 @@ export default function SendPage() {
         signalingRef.current?.disconnect();
       }
 
-      // Clear handshake timeout
+      // Clear timeouts
       if (handshakeTimeoutRef.current) {
         clearTimeout(handshakeTimeoutRef.current);
+      }
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
       }
     };
   }, []);
@@ -620,6 +624,15 @@ export default function SendPage() {
 
       // Initialize connection
       initializeConnection();
+
+      // Set a global connection timeout (15 seconds)
+      if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = setTimeout(() => {
+        if ((stepRef.current === "waiting" || stepRef.current === "connecting") && isMountedRef.current) {
+          setError("Connection timed out. The other device might be offline.");
+          reset();
+        }
+      }, 15000);
     },
     [files]
   );
@@ -719,6 +732,12 @@ export default function SendPage() {
         // CRITICAL FIX: Clear any existing handshake timeout
         if (handshakeTimeoutRef.current) {
           clearTimeout(handshakeTimeoutRef.current);
+        }
+
+        // Peer joined, so we can clear the connection timeout
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = null;
         }
 
         // CRITICAL FIX: Set handshake timeout

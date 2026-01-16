@@ -172,6 +172,9 @@ async function handleDiscoveryMessage(ws, message, ip, clientId) {
                         senderName: message.senderName || 'Someone'
                     });
                 }
+                else {
+                    send(ws, { type: 'error', error: 'Target device is no longer online' });
+                }
             }
             break;
         default:
