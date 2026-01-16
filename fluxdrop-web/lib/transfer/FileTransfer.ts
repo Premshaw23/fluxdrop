@@ -72,7 +72,7 @@ export class FileTransferSender {
   private readonly ACK_BACKOFF_MS = [100, 200, 500, 1000, 2000];
   private ackWaitStartTime: number = 0;
   private ackWaitRetryCount: number = 0;
-  private unackedCountThreshold: number = 150;
+  private unackedCountThreshold: number = 500; // Increased for better throughput (Approx 100MB window)
   private encryptionKey: CryptoKey | null = null;
   private files: File[] = [];
   private _fileIndex = 0;
@@ -88,7 +88,7 @@ export class FileTransferSender {
 
     // ✅ ADD: Track chunk resend attempts to prevent infinite loops
   private chunkResendCounts: Map<string, number> = new Map();
-  private readonly MAX_CHUNK_RESENDS = 50;
+  private readonly MAX_CHUNK_RESENDS = 15; // Lowered for faster failure detection
   private lastResendTime: Map<string, number> = new Map();
 
   public onProgress?: (progress: TransferProgress) => void;
@@ -216,19 +216,21 @@ export class FileTransferSender {
 
     if (header.type === "chunk-ack") {
       this.handleChunkAck(header.chunkIndex);
-    } else if (header.type === "ack-all") {
-      this.handleAckAll();
     } else if (header.type === "resume-request") {
       console.log(
-        `[FileTransferSender] Received resume-request for chunks:`,
-        header.missingChunks
+        `[FileTransferSender] Received resume-request for file ${header.fileIndex}, chunks:`,
+        header.missingChunks?.length
       );
-      this.handleResumeRequest(header.missingChunks || []);
+      this.handleResumeRequest(header.fileIndex ?? this._fileIndex, header.missingChunks || []);
     }
   }
 
-  public async handleResumeRequest(missingChunks: number[]) {
-    if (!this.chunks || !this.file) return;
+  public async handleResumeRequest(targetFileIndex: number, missingChunks: number[]) {
+    // If we've already moved far past this file, we might not have the chunks anymore
+    if (!this.chunks || !this.file || targetFileIndex !== this._fileIndex) {
+        console.error(`[FileTransferSender] Cannot handle resume-request: File mismatch or not loaded. Requested: ${targetFileIndex}, Current: ${this._fileIndex}`);
+        return;
+    }
 
     console.log(
       `[FileTransferSender] Handling resume-request for ${
@@ -241,12 +243,12 @@ export class FileTransferSender {
     const now = Date.now();
     const chunksToResend: number[] = [];
     const failedChunks: number[] = [];
-    const backedOffChunks: number[] = []; // ✅ NEW: Track chunks in backoff
+    const backedOffChunks: number[] = [];
     
     for (const idx of missingChunks) {
       const key = `${this._fileIndex}-${idx}`;
       
-      // 1. Check if already ACKed (Stop immediately if so)
+      // 1. Check if already ACKed
       if (this.acknowledgedChunks.has(idx)) {
         continue;
       }
@@ -272,7 +274,6 @@ export class FileTransferSender {
         continue;
       }
       
-      // ✅ VALIDATED: Mark as about-to-be-sent to prevent overlapping resends
       this.chunkResendCounts.set(key, resendCount + 1);
       this.lastResendTime.set(key, now);
       chunksToResend.push(idx);
@@ -280,9 +281,8 @@ export class FileTransferSender {
     
     // Check for permanent failures
     if (failedChunks.length > 0) {
-      this.onError?.(new Error(
-        `Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} attempts. Failed chunks: ${failedChunks.slice(0, 10).join(", ")}`
-      ));
+      const errorMsg = `Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} attempts. This usually indicates an unstable network or an overwhelmed receiver.`;
+      this.onError?.(new Error(errorMsg));
       this.cancel();
       return;
     }
@@ -293,7 +293,7 @@ export class FileTransferSender {
       const firstChunkAttempts = this.chunkResendCounts.get(firstChunkKey) || 0;
       
       if (firstChunkAttempts >= 10) {
-        console.warn(`[FileTransferSender] 🔥 DEADLOCK DETECTED! Bypassing backoff for ${backedOffChunks.length} chunks`);
+        console.warn(`[FileTransferSender] 🔥 DEADLOCK DETECTED! Bypassing backoff`);
         for (const idx of backedOffChunks) {
           const key = `${this._fileIndex}-${idx}`;
           const currentCount = this.chunkResendCounts.get(key) || 0;
@@ -302,7 +302,7 @@ export class FileTransferSender {
           chunksToResend.push(idx);
         }
       } else {
-        console.log(`[FileTransferSender] Chunks in backoff, waiting for next request cycle...`);
+        console.log(`[FileTransferSender] Chunks in backoff, waiting...`);
         return;
       }
     }
@@ -320,9 +320,9 @@ export class FileTransferSender {
 
     // Check backpressure
     const buffered = this.getBufferedAmount();
-    if (buffered > CHUNK_SIZE * 5) {
-      console.warn(`[FileTransferSender] High buffered amount, delaying resends`);
-      setTimeout(() => this.handleResumeRequest(chunksToResend), 1000);
+    if (buffered > CHUNK_SIZE * 20) { // Increased tolerance for resends
+      console.warn(`[FileTransferSender] High buffered amount (${formatBytes(buffered)}), delaying resends`);
+      setTimeout(() => this.handleResumeRequest(targetFileIndex, chunksToResend), 500);
       return;
     }
 
@@ -568,8 +568,8 @@ export class FileTransferSender {
     }
 
     const buffered = this.getBufferedAmount();
-    if (buffered > CHUNK_SIZE * 2) {
-      setTimeout(() => this.sendNextChunk(), 120);
+    if (buffered > CHUNK_SIZE * 30) { // Approx 6MB buffer limit for better throughput
+      setTimeout(() => this.sendNextChunk(), 50);
       return;
     }
 
@@ -1029,8 +1029,11 @@ private async handleComplete(fileIndex: number) {
 
   const elapsed = Date.now() - state.completeWaitStartTime;
 
-  // ✅ CRITICAL FIX: More lenient timeout (60s -> 120s for large files)
-  const timeout = state.metadata.size > 100 * 1024 * 1024 ? 120000 : 60000; // 2min for files >100MB
+  // ✅ DYNAMIC TIMEOUT: 60s base + 1s per MB, capped at 5 minutes
+  const fileSizeMB = state.metadata.size / (1024 * 1024);
+  const baseTimeout = 60000;
+  const dynamicTimeout = baseTimeout + (fileSizeMB * 1000);
+  const timeout = Math.min(dynamicTimeout, 300000); 
 
   if (elapsed > timeout) {
     const missingChunks: number[] = [];
@@ -1148,7 +1151,7 @@ private async completeFile(fileIndex: number, state: any) {
     return;
   }
 
-  // Build chunks array
+  // ✅ MEMORY OPTIMIZED: Build array and clear Map memory immediately
   const chunks: ArrayBuffer[] = [];
   for (let i = 0; i < state.metadata.chunks; i++) {
     const chunk = state.receivedChunks.get(i);
@@ -1158,6 +1161,9 @@ private async completeFile(fileIndex: number, state: any) {
       return;
     }
     chunks.push(chunk);
+    // CRITICAL: Free the chunk from the Map as we move it to the array
+    // to prevent doubling memory usage during Blob creation
+    state.receivedChunks.delete(i);
   }
 
   // Create blob
@@ -1172,16 +1178,23 @@ private async completeFile(fileIndex: number, state: any) {
     return;
   }
 
-  // Calculate hash for verification
-  const arrayBuffer = await blob.arrayBuffer();
-  const hashBuffer = await sha256(arrayBuffer);
-  const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+  // ✅ OPTIMIZATION: Only full-hash files < 20MB
+  let hashB64 = "verified-by-chunks";
+  if (state.metadata.size < 20 * 1024 * 1024) {
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const hashBuffer = await sha256(arrayBuffer);
+      hashB64 = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+    } catch (e) {
+      console.warn("[FileTransferReceiver] Final hash calculation failed (non-critical):", e);
+    }
+  }
 
   console.log(`[FileTransferReceiver] ✅ File ${fileIndex} complete:`, {
     name: state.metadata.name,
     size: blob.size,
     chunks: state.metadata.chunks,
-    sha256: hashB64.substring(0, 16) + "...",
+    verification: hashB64 === "verified-by-chunks" ? "Chunk-level" : "Full-file",
   });
 
   // Send ack-all (might be redundant but ensures sender knows)
