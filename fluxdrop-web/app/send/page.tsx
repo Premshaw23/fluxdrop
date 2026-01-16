@@ -333,7 +333,7 @@ export default function SendPage() {
     transfer.onProgress = (prog) => {
       if (!isMountedRef.current) return;
 
-      const fileIdx = transfer.fileIndex;
+      const fileIdx = prog.fileIndex !== undefined ? prog.fileIndex : transfer.fileIndex;
       setProgressList((prev) => {
         const updated = [...prev];
         updated[fileIdx] = prog.percentage;
@@ -347,6 +347,27 @@ export default function SendPage() {
       setTimeRemainingList((prev) => {
         const updated = [...prev];
         updated[fileIdx] = prog.timeRemaining;
+        return updated;
+      });
+    };
+
+    transfer.onFileComplete = (fileIdx) => {
+      console.log(`[SendPage] File ${fileIdx} complete`);
+      if (!isMountedRef.current) return;
+
+      setProgressList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = 100;
+        return updated;
+      });
+      setSpeedList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = 0;
+        return updated;
+      });
+      setTimeRemainingList((prev) => {
+        const updated = [...prev];
+        updated[fileIdx] = 0;
         return updated;
       });
     };

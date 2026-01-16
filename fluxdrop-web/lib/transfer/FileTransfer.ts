@@ -216,7 +216,6 @@ export class FileTransferSender {
     }
 
     if (fileIndex === this._fileIndex) {
-      // ✅ FIX #2: Clean up properly
       if (this.activeCheckInterval) {
         clearInterval(this.activeCheckInterval);
         this.activeCheckInterval = null;
@@ -225,9 +224,29 @@ export class FileTransferSender {
         clearTimeout(this.fileAckTimeout);
         this.fileAckTimeout = null;
       }
+      
+      // ✅ IMMEDIATELY proceed if this is the current file and we're waiting
+      if (!this.fileTransitionInProgress) {
+        this.transitionToNextFile();
+      }
     }
 
     this.fileCache.delete(fileIndex);
+  }
+
+  private transitionToNextFile() {
+    if (this.fileTransitionInProgress) return;
+    this.fileTransitionInProgress = true;
+
+    console.log(`[FileTransferSender] Transitioning from file ${this._fileIndex}`);
+    
+    const status = this.fileCompletionStatus.get(this._fileIndex);
+    if (status) status.allChunksAcked = true;
+
+    this._fileIndex++;
+    this.startNextFile().finally(() => {
+      this.fileTransitionInProgress = false;
+    });
   }
 
   public async handleResumeRequest(targetFileIndex: number, missingChunks: number[]) {
@@ -399,6 +418,7 @@ export class FileTransferSender {
     }
 
     if (this._fileIndex >= this.files.length) {
+      console.log(`[FileTransferSender] All files complete (${this.files.length} total)`);
       this.onComplete?.();
       return;
     }
@@ -494,58 +514,47 @@ export class FileTransferSender {
       this.onFileComplete?.(this._fileIndex);
       this.sendMessage({ type: "complete", fileIndex: this._fileIndex });
 
-      // ✅ FIX #2: Use flag to prevent race condition
-      if (this.fileTransitionInProgress) {
-        console.log(`[FileTransferSender] File transition already in progress, skipping`);
-        return;
-      }
-
       this.activeCheckInterval = setInterval(() => {
-        if (this.fileTransitionInProgress) return; // Double-check
-        
         const ackedCount = this.acknowledgedChunks.size;
         const totalChunks = this.chunks.length;
 
         if (ackedCount >= totalChunks) {
           console.log(`[FileTransferSender] ✅ All chunks for file ${this._fileIndex} acknowledged!`);
           
-          this.fileTransitionInProgress = true;
+          if (this.activeCheckInterval) {
+            clearInterval(this.activeCheckInterval);
+            this.activeCheckInterval = null;
+          }
+          if (this.fileAckTimeout) {
+            clearTimeout(this.fileAckTimeout);
+            this.fileAckTimeout = null;
+          }
           
-          if (this.activeCheckInterval) clearInterval(this.activeCheckInterval);
-          if (this.fileAckTimeout) clearTimeout(this.fileAckTimeout);
-          
-          const status = this.fileCompletionStatus.get(this._fileIndex);
-          if (status) status.allChunksAcked = true;
-          
-          this._fileIndex++;
-          this.startNextFile().finally(() => {
-            this.fileTransitionInProgress = false;
-          });
+          this.transitionToNextFile();
         }
       }, 500);
 
       this.fileAckTimeout = setTimeout(() => {
         if (this.fileTransitionInProgress) return;
         
-        this.fileTransitionInProgress = true;
+        if (this.activeCheckInterval) {
+          clearInterval(this.activeCheckInterval);
+          this.activeCheckInterval = null;
+        }
+        if (this.fileAckTimeout) {
+          clearTimeout(this.fileAckTimeout);
+          this.fileAckTimeout = null;
+        }
         
-        if (this.activeCheckInterval) clearInterval(this.activeCheckInterval);
         console.warn(`[FileTransferSender] ⚠️ Timeout for file ${this._fileIndex}, proceeding`);
-
-        this._fileIndex++;
-        this.startNextFile().finally(() => {
-          this.fileTransitionInProgress = false;
-        });
+        this.transitionToNextFile();
       }, this.FILE_ACK_TIMEOUT_MS);
 
       return;
     }
 
-    if (!this.chunkRetryCounts[this.currentChunk]) {
-      this.chunkRetryCounts[this.currentChunk] = 0;
-    }
-    
-    if (this.chunkRetryCounts[this.currentChunk] >= this.maxChunkRetries) {
+    const retryCount = this.chunkRetryCounts[this.currentChunk] || 0;
+    if (retryCount >= this.maxChunkRetries) {
       this.onError?.(new Error(`Max retries reached for chunk ${this.currentChunk}`));
       this.isCancelled = true;
       return;
@@ -566,8 +575,11 @@ export class FileTransferSender {
     let arrayBuffer: ArrayBuffer;
     if (this.chunkBuffer[this.currentChunk]) {
       arrayBuffer = this.chunkBuffer[this.currentChunk]!;
-    } else {
+    } else if (this.chunks[this.currentChunk]) {
       arrayBuffer = await this.chunks[this.currentChunk].arrayBuffer();
+    } else {
+      console.error(`[FileTransferSender] Chunk missing at index ${this.currentChunk}`);
+      return;
     }
 
     if (this.currentChunk > 0) {
