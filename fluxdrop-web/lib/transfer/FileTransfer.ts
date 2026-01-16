@@ -35,11 +35,13 @@ interface ChunkMessage {
     | "file-complete-ack"
     | "resume-request"
     | "chunk-ack"
-    | "ack-all";
+    | "ack-all"
+    | "batch-ack"; // ✅ NEW: Batch acknowledgments
   missingChunks?: number[];
   batchMetadata?: BatchMetadata;
   metadata?: FileMetadata;
   chunkIndex?: number;
+  chunkIndices?: number[]; // ✅ NEW: For batch acks
   data?: ArrayBuffer;
   iv?: number[];
   hash?: string;
@@ -101,8 +103,11 @@ export class FileTransferSender {
   }> = new Map();
 
   private chunkResendCounts: Map<string, number> = new Map();
-  private readonly MAX_CHUNK_RESENDS = 15;
+  private readonly MAX_CHUNK_RESENDS = 20; // ✅ Increased from 15
   private lastResendTime: Map<string, number> = new Map();
+  
+  // ✅ NEW: Track chunks currently being resent
+  private chunksInFlight: Set<string> = new Set();
 
   public onProgress?: (progress: TransferProgress) => void;
   public onComplete?: () => void;
@@ -171,12 +176,25 @@ export class FileTransferSender {
     return unacked;
   }
 
+  // ✅ NEW: Handle batch acknowledgments
+  public handleBatchAck(fileIndex: number, chunkIndices: number[]) {
+    if (fileIndex !== this._fileIndex) return;
+    
+    chunkIndices.forEach(idx => {
+      this.acknowledgedChunks.add(idx);
+      const key = `${fileIndex}-${idx}`;
+      this.chunksInFlight.delete(key);
+    });
+    
+    console.log(`[FileTransferSender] ✅ Batch ACK: ${chunkIndices.length} chunks for file ${fileIndex}`);
+  }
+
   public handleChunkAck(fileIndex: number, chunkIndex: number) {
-    if (fileIndex !== this._fileIndex) {
-      // Ignore ACKs for old or future files
-      return;
-    }
+    if (fileIndex !== this._fileIndex) return;
+    
     this.acknowledgedChunks.add(chunkIndex);
+    const key = `${fileIndex}-${chunkIndex}`;
+    this.chunksInFlight.delete(key);
   }
 
   public handleAckAll(fileIndex: number) {
@@ -184,6 +202,8 @@ export class FileTransferSender {
     if (this.chunks) {
       for (let i = 0; i < this.chunks.length; i++) {
         this.acknowledgedChunks.add(i);
+        const key = `${fileIndex}-${i}`;
+        this.chunksInFlight.delete(key);
       }
     }
   }
@@ -198,6 +218,9 @@ export class FileTransferSender {
 
     if (header.type === "chunk-ack") {
       this.handleChunkAck(header.fileIndex ?? this._fileIndex, header.chunkIndex);
+    } else if (header.type === "batch-ack") {
+      // ✅ NEW: Handle batch acks
+      this.handleBatchAck(header.fileIndex ?? this._fileIndex, header.chunkIndices || []);
     } else if (header.type === "file-complete-ack") {
       this.handleFileCompleteAck(header.fileIndex ?? this._fileIndex);
     } else if (header.type === "resume-request") {
@@ -328,7 +351,15 @@ export class FileTransferSender {
     for (const idx of missingChunks) {
       const key = `${fileIndex}-${idx}`;
       
+      // ✅ FIX: Skip if already ACKed
       if (fileIndex === this._fileIndex && this.acknowledgedChunks.has(idx)) {
+        console.log(`[FileTransferSender] Skipping chunk ${idx} - already ACKed`);
+        continue;
+      }
+      
+      // ✅ FIX: Skip if currently in-flight
+      if (this.chunksInFlight.has(key)) {
+        console.log(`[FileTransferSender] Skipping chunk ${idx} - already in flight`);
         continue;
       }
 
@@ -339,31 +370,36 @@ export class FileTransferSender {
       }
       
       const lastSent = this.lastResendTime.get(key) || 0;
-      const backoffDelay = Math.min(3000, 100 * Math.pow(1.5, resendCount));
+      // ✅ FIX: Exponential backoff with jitter
+      const backoffDelay = Math.min(5000, 200 * Math.pow(1.5, resendCount)) + Math.random() * 100;
       const timeSinceLastSend = now - lastSent;
       
       if (timeSinceLastSend < backoffDelay) {
+        console.log(`[FileTransferSender] Throttling chunk ${idx} - sent ${timeSinceLastSend}ms ago, need ${backoffDelay}ms`);
         continue;
       }
       
       this.chunkResendCounts.set(key, resendCount + 1);
       this.lastResendTime.set(key, now);
+      this.chunksInFlight.add(key); // ✅ Mark as in-flight
       chunksToResend.push(idx);
     }
     
     if (failedChunks.length > 0) {
-      this.onError?.(new Error(`Transfer failed: ${failedChunks.length} chunks could not be sent`));
+      console.error(`[FileTransferSender] ❌ ${failedChunks.length} chunks exceeded retry limit`);
+      this.onError?.(new Error(`Transfer failed: ${failedChunks.length} chunks could not be sent after ${this.MAX_CHUNK_RESENDS} retries`));
       this.cancel();
       return [];
     }
 
     const buffered = this.getBufferedAmount();
     if (buffered > CHUNK_SIZE * 20) {
-      console.warn(`[FileTransferSender] High buffered amount, delaying resends`);
+      console.warn(`[FileTransferSender] High buffered amount (${buffered} bytes), delaying resends`);
       setTimeout(() => this.handleResumeRequest(fileIndex, chunksToResend), 500);
       return [];
     }
 
+    console.log(`[FileTransferSender] 📤 Resending ${chunksToResend.length} chunks for file ${fileIndex}`);
     return chunksToResend;
   }
 
@@ -458,6 +494,7 @@ export class FileTransferSender {
     this.chunkRetryCounts = {}; // Reset retry counts for new file
     this.chunkResendCounts.clear();
     this.lastResendTime.clear();
+    this.chunksInFlight.clear(); // ✅ Clear in-flight tracking
     this.fileTransitionInProgress = false;
 
     this.fileCompletionStatus.set(this._fileIndex, {
@@ -643,6 +680,7 @@ export class FileTransferSender {
       type: message.type,
       metadata: message.metadata,
       chunkIndex: message.chunkIndex,
+      chunkIndices: message.chunkIndices, // ✅ NEW
       fileIndex: message.fileIndex,
     };
     if (message.iv) headerObj.iv = message.iv;
@@ -698,12 +736,14 @@ export class FileTransferReceiver {
     completeWaitStartTime: number;
     completeFileInProgress: boolean;
     lastMissingChunkRequest: number;
-    highestChunkReceived: number; // ✅ FIX #4: Track progress
+    highestChunkReceived: number;
+    pendingAcks: Set<number>;
+    lastAckBatchSent: number;
   }> = new Map();
   
   // ✅ FIX #4: Proactive missing chunk detection
   private lastProactiveCheckTime: Map<number, number> = new Map();
-  private readonly PROACTIVE_CHECK_INTERVAL_MS = 5000;
+  private readonly PROACTIVE_CHECK_INTERVAL_MS = 10000; // ✅ Reduced frequency from 5s
   
   // ✅ FIX #5: Max retry count for crash recovery
   private fileResumeRetryCount: Map<number, number> = new Map();
@@ -748,6 +788,21 @@ export class FileTransferReceiver {
     combined.set(new Uint8Array(headerLengthBuffer), 0);
     combined.set(header, 4);
     this.sendDataCallback(combined);
+  }
+
+  private sendBatchAck(fileIndex: number) {
+    const state = this.fileStates.get(fileIndex);
+    if (!state || state.pendingAcks.size === 0) return;
+
+    const chunkIndices = Array.from(state.pendingAcks) as number[];
+    state.pendingAcks.clear();
+    state.lastAckBatchSent = Date.now();
+
+    this.sendControlMessage({
+      type: "batch-ack",
+      fileIndex,
+      chunkIndices
+    });
   }
 
   private sendAckAll(fileIndex: number) {
@@ -813,6 +868,8 @@ export class FileTransferReceiver {
       completeFileInProgress: false,
       lastMissingChunkRequest: 0,
       highestChunkReceived: -1,
+      pendingAcks: new Set(), // ✅ NEW
+      lastAckBatchSent: 0,    // ✅ NEW
     });
     this.onMetadata?.(metadata);
   }
@@ -852,11 +909,16 @@ export class FileTransferReceiver {
     state.bytesReceived += chunkData.byteLength;
     state.highestChunkReceived = Math.max(state.highestChunkReceived, chunkIndex);
 
-    this.sendControlMessage({ type: "chunk-ack", chunkIndex, fileIndex });
+    // ✅ NEW: Buffer ACKs
+    state.pendingAcks.add(chunkIndex);
+    const now = Date.now();
+    if (state.pendingAcks.size >= 50 || now - state.lastAckBatchSent > 1000) {
+      this.sendBatchAck(fileIndex);
+    }
+
     this.updateProgress(fileIndex, state);
 
     // ✅ FIX #4: Proactive missing chunk detection
-    const now = Date.now();
     const lastCheck = this.lastProactiveCheckTime.get(fileIndex) || 0;
 
     if (now - lastCheck > this.PROACTIVE_CHECK_INTERVAL_MS) {
@@ -865,7 +927,7 @@ export class FileTransferReceiver {
       const receivedCount = state.receivedChunkBitmap.filter(Boolean).length;
       const expectedByNow = Math.min(chunkIndex + 100, state.metadata.chunks);
       
-      if (receivedCount < expectedByNow * 0.95) {
+      if (receivedCount < expectedByNow * 0.9) { // Increased threshold slightly
         console.warn(`[FileTransferReceiver] Detected missing chunks for file ${fileIndex}`);
         const missingChunks: number[] = [];
         for (let i = 0; i < Math.min(chunkIndex + 50, state.metadata.chunks); i++) {
@@ -885,6 +947,7 @@ export class FileTransferReceiver {
     }
 
     if (state.receivedChunkBitmap.every(Boolean)) {
+      this.sendBatchAck(fileIndex); // Send any remaining ACKs
       this.sendAckAll(fileIndex);
       await this.completeFile(fileIndex, state);
     }
@@ -912,7 +975,10 @@ export class FileTransferReceiver {
     const state = this.fileStates.get(fileIndex);
     if (!state) return;
 
+    console.log(`[FileTransferReceiver] complete message for file ${fileIndex}`);
     state.completeMessageReceived = true;
+    
+    this.sendBatchAck(fileIndex); // Flush pending ACKs
 
     if (state.receivedChunkBitmap.every(Boolean)) {
       await this.completeFile(fileIndex, state);
