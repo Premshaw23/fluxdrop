@@ -4,7 +4,7 @@ type MessageHandler = (message: any) => void;
 
 export class SignalingClient {
   private ws: WebSocket | null = null;
-  private messageHandlers = new Map<string, MessageHandler>();
+  private messageHandlers = new Map<string, MessageHandler[]>();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
@@ -72,20 +72,26 @@ export class SignalingClient {
   private handleMessage(message: any) {
     console.log('📨 Received:', message.type);
 
-    const handler = this.messageHandlers.get(message.type);
-    if (handler) {
-      handler(message);
+    const handlers = this.messageHandlers.get(message.type);
+    if (handlers && handlers.length > 0) {
+      handlers.forEach(handler => handler(message));
     } else {
       console.warn('No handler for message type:', message.type);
     }
   }
 
   on(type: string, handler: MessageHandler) {
-    this.messageHandlers.set(type, handler);
+    const handlers = this.messageHandlers.get(type) || [];
+    this.messageHandlers.set(type, [...handlers, handler]);
   }
 
-  off(type: string) {
-    this.messageHandlers.delete(type);
+  off(type: string, handler?: MessageHandler) {
+    if (!handler) {
+      this.messageHandlers.delete(type);
+    } else {
+      const handlers = this.messageHandlers.get(type) || [];
+      this.messageHandlers.set(type, handlers.filter(h => h !== handler));
+    }
   }
 
   send(message: any) {

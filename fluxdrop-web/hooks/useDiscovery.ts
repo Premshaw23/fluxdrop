@@ -28,6 +28,7 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
 
     const handlePeers = (message: any) => {
       if (mountedRef.current) {
+        console.log(`📡 Discovery: Found ${message.peers?.length || 0} peers`, message.peers);
         setPeers(message.peers || []);
         setIsDiscovering(false); // Stop loading spinner if used
       }
@@ -81,7 +82,7 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
     // BUT we should also listen for 'open' event if we passed the client before it opened.
     // However, assuming the parent component handles connection state, we can just poll.
 
-    const interval = setInterval(announceAndPoll, 10000); // 10s heartbeat
+    const interval = setInterval(announceAndPoll, 5000); // 5s heartbeat
 
     return () => clearInterval(interval);
   }, [signaling, deviceName, deviceType]);
