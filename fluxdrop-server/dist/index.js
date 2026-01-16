@@ -101,9 +101,24 @@ wss.on('connection', (ws, req) => {
                 }
             }
             // 2. Cleanup Discovery
-            await discoveryService.removeDevice(client.ip, client.id);
+            const idToRemove = client.deviceId || client.id;
+            // Check if there are other connections for the same deviceId
+            // to avoid removing it if the user just closed one of multiple tabs.
+            let isDeviceStillConnected = false;
+            if (client.deviceId) {
+                for (const [otherWs, otherClient] of clients.entries()) {
+                    if (otherWs !== ws && otherClient.deviceId === client.deviceId) {
+                        isDeviceStillConnected = true;
+                        break;
+                    }
+                }
+            }
+            if (!isDeviceStillConnected) {
+                await discoveryService.removeDevice(client.ip, idToRemove);
+                console.log(`📡 Device removed from discovery: ${idToRemove}`);
+            }
             clients.delete(ws);
-            console.log(`👋 Client disconnected: ${client.id}`);
+            console.log(`👋 Client disconnected: ${client.id} (Device: ${client.deviceId || 'none'})`);
         }
     });
     ws.on('error', (error) => {
@@ -115,8 +130,12 @@ async function handleDiscoveryMessage(ws, message, ip, clientId) {
         case 'discovery:announce':
             // Client is announcing its presence
             if (message.device) {
+                const client = clients.get(ws);
+                if (!client)
+                    return;
                 // Use client-provided ID for deduplication if available, otherwise fallback to connection ID
                 const finalId = message.device.id || clientId;
+                client.deviceId = finalId; // Track which device ID this connection is associated with
                 const device = { ...message.device, id: finalId };
                 await discoveryService.announceDevice(ip, device);
                 // Acknowledge
@@ -126,8 +145,10 @@ async function handleDiscoveryMessage(ws, message, ip, clientId) {
         case 'discovery:list':
             // Client wants to know who is nearby
             const devices = await discoveryService.getPeers(ip);
-            // Filter out self
-            const others = devices.filter(d => d.id !== clientId);
+            const clientObj = clients.get(ws);
+            // Filter out self using the persistent device ID if known, otherwise connection ID
+            const myId = clientObj?.deviceId || clientId;
+            const others = devices.filter(d => d.id !== myId);
             send(ws, { type: 'discovery:peers', peers: others });
             break;
         case 'discovery:invite':
@@ -138,7 +159,8 @@ async function handleDiscoveryMessage(ws, message, ip, clientId) {
                 // This is O(N) unless we keep a secondary index. For now O(N) is fine for small scale.
                 let targetWs;
                 for (const [s, c] of clients.entries()) {
-                    if (c.id === message.targetId) {
+                    // Check both deviceId AND connection id for compatibility
+                    if (c.deviceId === message.targetId || c.id === message.targetId) {
                         targetWs = s;
                         break;
                     }
