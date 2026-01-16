@@ -143,15 +143,13 @@ async function handleDiscoveryMessage(ws: WebSocket, message: any, ip: string, c
     case 'discovery:announce':
       // Client is announcing its presence
       if (message.device) {
-        // Enforce the server-assigned ID to prevent spoofing
-        const device = { ...message.device, id: clientId };
+        // Use client-provided ID for deduplication if available, otherwise fallback to connection ID
+        const finalId = message.device.id || clientId;
+        const device = { ...message.device, id: finalId };
+        
         await discoveryService.announceDevice(ip, device);
         // Acknowledge
         send(ws, { type: 'discovery:announced', device });
-        
-        // Broadcast update to others on same IP? 
-        // Typically we wait for them to poll or we could pub/sub.
-        // For simplicity, let's just let them poll or re-announce.
       }
       break;
 

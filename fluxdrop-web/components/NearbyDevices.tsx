@@ -16,12 +16,18 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
     deviceType: role // Announce as sender or receiver
   });
 
-  // Filter to show the opposite role
-  const filteredPeers = peers.filter(peer => {
-    if (role === 'sender') return peer.type === 'receiver';
-    if (role === 'receiver') return peer.type === 'sender';
-    return false;
-  });
+  // Filter to show the opposite role and deduplicate by ID
+  const filteredPeers = Array.from(
+    new Map(
+      peers
+        .filter(peer => {
+          if (role === 'sender') return peer.type === 'receiver';
+          if (role === 'receiver') return peer.type === 'sender';
+          return false;
+        })
+        .map(peer => [peer.id, peer])
+    ).values()
+  );
 
   const getDeviceIcon = (type: string) => {
     switch (type?.toLowerCase()) {

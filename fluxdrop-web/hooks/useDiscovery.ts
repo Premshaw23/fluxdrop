@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SignalingClient } from '../lib/signaling/SignalingClient';
+import { useUserStore } from '../lib/store';
 
 export interface DiscoveredDevice {
   id: string;
@@ -67,11 +68,14 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
   useEffect(() => {
     if (!signaling) return;
 
+    const { deviceId } = useUserStore.getState();
+
     const announceAndPoll = () => {
       if (!signaling.isConnected()) return;
 
       // 1. Announce Self
       signaling.announceDevice({
+        id: deviceId,
         name: deviceName,
         type: deviceType,
         model: navigator.platform
