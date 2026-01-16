@@ -58,7 +58,7 @@ export default function NearbyDevices({ signaling, deviceName, onPair, role }: N
           <div className="h-3 w-3 rounded-full bg-green-500 shadow-sm border-2 border-white"></div>
         )}
         {role === 'sender' ? 'Nearby Receivers' : 'Nearby Senders'}
-        {role === 'receiver' && <span className="ml-1 text-[10px] lowercase font-medium text-purple-400 opacity-80">(Visible for discovery only)</span>}
+        {role === 'receiver' && <span className="ml-2 text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 animate-pulse">Listening for nearby senders</span>}
         {filteredPeers.length > 0 && <span className="bg-purple-600 text-white px-2.5 py-0.5 rounded-full text-xs font-bold shadow-sm ml-auto">{filteredPeers.length}</span>}
       </h3>
 

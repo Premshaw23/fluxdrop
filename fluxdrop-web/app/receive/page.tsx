@@ -96,12 +96,6 @@ export default function ReceivePage() {
     ensureName();
   }, [ensureName]);
 
-  const { peers } = useDiscovery({
-    signaling: signalingClient,
-    deviceName: name || "FluxDrop Receiver",
-    deviceType: "receiver"
-  });
-
   // Initialize mounted state & Auto-connect for discovery
   useEffect(() => {
     isMountedRef.current = true;
@@ -789,14 +783,33 @@ export default function ReceivePage() {
                 </p>
               </div>
 
-              <div className="mb-8">
+              {/* Nearby Devices Section - Priority 1 for Visibility */}
+              <NearbyDevices
+                signaling={signalingClient}
+                deviceName={name || "Receiver"}
+                role="receiver"
+                onPair={(device) => {
+                  console.log("Device selected:", device);
+                }}
+              />
+
+              <div className="relative my-8">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-purple-100"></div>
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-white px-4 text-purple-400 font-bold tracking-widest">Or Enter Connection Code</span>
+                </div>
+              </div>
+
+              <div className="mb-6">
                 <input
                   type="text"
                   maxLength={6}
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
                   placeholder="000000"
-                  className="w-full text-5xl font-mono font-black text-center text-purple-600 tracking-[0.2em] p-6 border-2 border-purple-100 rounded-2xl focus:border-purple-400 bg-purple-50/30 shadow-inner transition-all outline-none placeholder:text-purple-200"
+                  className="w-full text-4xl sm:text-5xl font-mono font-black text-center text-purple-600 tracking-[0.2em] p-4 sm:p-5 border-2 border-purple-100 rounded-2xl focus:border-purple-400 bg-purple-50/30 shadow-inner transition-all outline-none placeholder:text-purple-200"
                   autoFocus
                 />
               </div>
@@ -810,34 +823,11 @@ export default function ReceivePage() {
               <button
                 onClick={() => handleJoinSession()}
                 disabled={code.length !== 6}
-                className="w-full bg-purple-600 text-white py-4 px-6 rounded-2xl hover:bg-purple-700 disabled:bg-purple-100 disabled:text-purple-300 font-bold transition-all shadow-xl shadow-purple-100 mb-8 active:scale-[0.98] transform"
+                className="w-full bg-purple-600 text-white py-4 px-6 rounded-2xl hover:bg-purple-700 disabled:bg-purple-100 disabled:text-purple-300 font-bold transition-all shadow-xl shadow-purple-100 mb-4 active:scale-[0.98] transform"
               >
                 <Download className="w-5 h-5 mr-2 inline-block" />
                 Connect & Start Receiving
               </button>
-
-              <div className="relative mb-4">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-purple-100"></div>
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-white px-4 text-purple-400 font-bold tracking-widest">Or wait for invite</span>
-                </div>
-              </div>
-
-              {/* Nearby Devices Scanner */}
-              <NearbyDevices
-                signaling={signalingClient}
-                deviceName={name || "Receiver"}
-                role="receiver"
-                onPair={(device) => {
-                  // If we click on a sender, we should probably do something...
-                  // But in this app, senders invite receivers.
-                  // Maybe we can notify the sender that we are ready?
-                  // For now, it just shows that we are visible.
-                  console.log("Device selected:", device);
-                }}
-              />
             </div>
           )}
 

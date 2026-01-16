@@ -28,9 +28,17 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
 
     const handlePeers = (message: any) => {
       if (mountedRef.current) {
-        console.log(`📡 Discovery: Found ${message.peers?.length || 0} peers`, message.peers);
-        setPeers(message.peers || []);
-        setIsDiscovering(false); // Stop loading spinner if used
+        const sortedPeers = [...(message.peers || [])].sort((a, b) => {
+          // Sort by name first for visual stability
+          const nameCompare = (a.name || "").localeCompare(b.name || "");
+          if (nameCompare !== 0) return nameCompare;
+          // Then by ID as fallback
+          return a.id.localeCompare(b.id);
+        });
+        
+        console.log(`📡 Discovery: Found ${sortedPeers.length} peers (Sorted)`, sortedPeers);
+        setPeers(sortedPeers);
+        setIsDiscovering(false); 
       }
     };
 
@@ -49,9 +57,9 @@ export function useDiscovery({ signaling, deviceName, deviceType }: UseDiscovery
     signaling.on('error', handleError);
 
     return () => {
-      signaling.off('discovery:peers');
-      signaling.off('discovery:announced');
-      signaling.off('error');
+      signaling.off('discovery:peers', handlePeers);
+      signaling.off('discovery:announced', handleAnnounced);
+      signaling.off('error', handleError);
     };
   }, [signaling]);
 
