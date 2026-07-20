@@ -5,7 +5,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://flux-drop.vercel.app"),
+  metadataBase: new URL("https://www.fluxdrop.app"),
 
   title: {
     default: "FluxDrop - Fast, Secure & Instant File Sharing (P2P)",
@@ -57,18 +57,18 @@ export const metadata: Metadata = {
   },
 
   alternates: {
-    canonical: "https://flux-drop.vercel.app",
+    canonical: "https://www.fluxdrop.app",
   },
 
   openGraph: {
     title: "FluxDrop - Instant P2P File Sharing",
     description:
       "Transfer files directly between devices with zero setup. Secure, fast, and private end-to-end encrypted file sharing.",
-    url: "https://flux-drop.vercel.app",
+    url: "https://www.fluxdrop.app",
     siteName: "FluxDrop",
     images: [
       {
-        url: "https://flux-drop.vercel.app/og-image.png",
+        url: "https://www.fluxdrop.app/og-image.png",
         width: 1200,
         height: 630,
         alt: "FluxDrop - Instant File Sharing",
@@ -83,7 +83,7 @@ export const metadata: Metadata = {
     title: "FluxDrop - Fast & Secure File Sharing",
     description:
       "No more emails or cables. Share files instantly between any device with FluxDrop.",
-    images: ["https://flux-drop.vercel.app/og-image.png"],
+    images: ["https://www.fluxdrop.app/og-image.png"],
   },
 };
 
@@ -114,7 +114,7 @@ export default function RootLayout({
                 "@context": "https://schema.org",
                 "@type": "WebApplication",
                 name: "FluxDrop",
-                url: "https://flux-drop.vercel.app",
+                url: "https://www.fluxdrop.app",
                 description:
                   "Instant peer-to-peer file sharing application using WebRTC technology.",
                 applicationCategory: "FileSharingApplication",
@@ -136,8 +136,8 @@ export default function RootLayout({
                 "@context": "https://schema.org",
                 "@type": "Organization",
                 name: "FluxDrop",
-                url: "https://flux-drop.vercel.app",
-                logo: "https://flux-drop.vercel.app/icons/logo-512x512.png",
+                url: "https://www.fluxdrop.app",
+                logo: "https://www.fluxdrop.app/icons/logo-512x512.png",
               },
             ]),
           }}

@@ -150,7 +150,7 @@ npm run dev
 - [API & Protocol](./API.md)
 - [Architecture](./ARCHITECTURE.md)
 - [Security Model](./SECURITY.md)
-- Demo: https://flux-drop.vercel.app (when deployed)
+- Demo: https://www.fluxdrop.app (when deployed)
 - GitHub: https://github.com/yourusername/fluxdrop
 
 ---
