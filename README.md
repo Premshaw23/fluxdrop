@@ -1,4 +1,4 @@
-# FluxDrop 🚀
+# FluxDrop 
 
 <div align="center">
   <img src="fluxdrop-web/public/og-image.png" alt="FluxDrop Banner" width="100%">
